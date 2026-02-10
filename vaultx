@@ -447,7 +447,7 @@ collect_json_data_parallel() {
       [[ "$first_node" = false ]] && echo ','
       first_node=false
       echo "\"$NODE\": "
-      VAULT_ADDR=$NODE VAULT_TOKEN=$VAULT_TOKEN vault status -format=json 2>/dev/null || echo '{}'
+      run_with_timeout "$TIMEOUT" "VAULT_ADDR=$NODE VAULT_TOKEN=$VAULT_TOKEN vault status -format=json 2>/dev/null" || echo '{}'
     done
     echo '}'
   } > "$status_file" &
