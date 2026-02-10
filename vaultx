@@ -1,0 +1,546 @@
+#!/usr/bin/env bash
+
+# VaultX - Vault Cluster Diagnostic Tool
+# Exit on error, pipe failures
+set -o pipefail
+
+# Define colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+PINK='\033[0;35m'
+
+# Default configuration
+CONFIG_FILE="${HOME}/.vaultx.conf"
+TIMEOUT=5
+LOG_LEVEL="INFO"
+LOG_FILE="${HOME}/.vaultx.log"
+
+# Load config if exists
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# ---------- Logging ----------
+
+log() {
+  local level="$1"; local message="$2"; local timestamp
+  timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+  local level_num
+  case "$level" in
+    DEBUG) level_num=0;; INFO) level_num=1;; WARN) level_num=2;; ERROR) level_num=3;; *) level_num=1;;
+  esac
+  local config_level_num
+  case "$LOG_LEVEL" in
+    DEBUG) config_level_num=0;; INFO) config_level_num=1;; WARN) config_level_num=2;; ERROR) config_level_num=3;; *) config_level_num=1;;
+  esac
+  if [[ $level_num -ge $config_level_num ]]; then
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    [[ "$level" = "ERROR" ]] && echo "[$level] $message" >&2
+  fi
+}
+
+error_exit() { log "ERROR" "$1"; echo -e "${RED}ERROR: $1${NC}" >&2; cleanup; exit 1; }
+
+cleanup() {
+  log "DEBUG" "Running cleanup"
+  if [[ -n "${temp_files[@]:-}" ]]; then rm -f "${temp_files[@]}" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+
+is_piped() { [[ ! -t 1 ]]; }
+color() { if is_piped; then cat; else echo -en "$1"; cat; echo -en "$NC"; fi; }
+
+check_dependencies() {
+  log "INFO" "Checking dependencies"
+  local missing_deps=()
+  for cmd in vault jq; do
+    command -v "$cmd" >/dev/null 2>&1 || missing_deps+=("$cmd")
+  done
+  [[ ${#missing_deps[@]} -gt 0 ]] && error_exit "Missing required dependencies: ${missing_deps[*]}"
+  log "INFO" "All dependencies satisfied"
+}
+
+JSON_FORMAT=false
+EXPORT_FILE=""
+
+show_help() {
+  cat << EOF
+VaultX - A diagnostic tool for HashiCorp Vault clusters
+
+USAGE:
+  vaultx [OPTIONS]
+
+OPTIONS:
+  -format=json       Output in JSON format
+  --timeout=SECONDS  Set timeout for Vault operations (default: $TIMEOUT)
+  --config=FILE      Specify config file (default: $CONFIG_FILE)
+  --export=FILE      Export data to specified file
+  --help             Show this help message
+
+EXAMPLES:
+  vaultx                              # Colorized CLI output
+  vaultx -format=json                 # JSON output to stdout
+  vaultx --export=diagnostics.json    # Export to file
+  vaultx --timeout=10                 # Increase timeout for slow clusters
+
+DESCRIPTION:
+  VaultX collects comprehensive diagnostic information from your Vault cluster
+  including node status, Raft configuration, license info, replication status,
+  and more. Perfect for generating support tickets or troubleshooting.
+EOF
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+    -format=json) JSON_FORMAT=true ;;
+    --timeout=*) TIMEOUT="${1#*=}" ;;
+    --config=*) CONFIG_FILE="${1#*=}"; source "$CONFIG_FILE" ;;
+    --export=*) EXPORT_FILE="${1#*=}" ;;
+    --help) show_help; exit 0 ;;
+    *) echo "Unknown parameter passed: $1"; show_help; exit 1 ;;
+  esac
+  shift
+done
+
+run_with_timeout() {
+  local timeout="$1"
+  local cmd="$2"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "$timeout" env bash -c "$cmd"
+    return $?
+  else
+    # Fallback for systems without timeout command
+    eval "$cmd"
+    return $?
+  fi
+}
+
+handle_vault_token() {
+  if [[ -z "${VAULT_TOKEN:-}" ]]; then
+    read -sp "Enter your Vault token: " VAULT_TOKEN; echo ""
+  else
+    if [[ "$JSON_FORMAT" = false ]]; then echo "Using VAULT_TOKEN from environment variable." | color "$GREEN"; fi
+  fi
+  if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault token lookup -format=json >/dev/null 2>&1"; then
+    error_exit "Invalid Vault token or connection failed"
+  fi
+  export VAULT_TOKEN
+  log "INFO" "Vault token validated successfully"
+}
+
+parse_raft_list_peers_cli() {
+  local output
+  output=$(run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers 2>&1") || return 1
+  local parsed_output='['; local first_row=true; local in_header=true
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$in_header" = true ]]; then
+      [[ "$line" == *"----"* ]] && in_header=false
+      continue
+    fi
+    local node=$(echo "$line" | awk '{print $1}')
+    local address=$(echo "$line" | awk '{print $2}')
+    local state=$(echo "$line" | awk '{print $3}')
+    local voter=$(echo "$line" | awk '{print $4}')
+    [[ "$first_row" = false ]] && parsed_output+=','
+    first_row=false
+    parsed_output+='{"node":"'"$node"'","address":"'"$address"'","state":"'"$state"'","voter":"'"$voter"'"}'
+  done <<< "$output"
+  parsed_output+=']'
+  echo "$parsed_output" | jq '.' >/dev/null 2>&1 || return 1
+  echo "$parsed_output"
+}
+
+get_raft_list_peers() {
+  log "DEBUG" "Getting Raft peers list"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Raft List Peers ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers 2>&1" | colorize_raft_list_peers; then
+      echo "Failed to get Raft peers" | color "$RED"
+    fi
+    echo ""
+  else
+    local cli_parsed
+    if cli_parsed=$(parse_raft_list_peers_cli); then
+      echo '{"cli_parsed": '"$cli_parsed"'}'; return
+    fi
+    local output
+    if ! output=$(run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers -format=json 2>&1"); then
+      echo "{}"
+    else
+      if echo "$output" | jq '.' >/dev/null 2>&1; then echo "$output"; else echo "{}"; fi
+    fi
+  fi
+}
+
+colorize_raft_list_peers() {
+  while IFS= read -r line; do
+    if [[ $line == "Node"* || $line == "----"* ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      node=$(echo "$line" | awk '{print $1}')
+      address=$(echo "$line" | awk '{print $2}')
+      state=$(echo "$line" | awk '{print $3}')
+      voter=$(echo "$line" | awk '{print $4}')
+      if [[ $state == "leader" ]]; then
+        printf "%-10s %-21s %-11s %-5s\n" "$node" "$address" "$state" "$voter" | color "$PINK"
+      else
+        printf "%-10s %-21s %-11s %-5s\n" "$node" "$address" "$state" "$voter" | color "$GREEN"
+      fi
+    fi
+  done
+}
+
+discover_nodes() {
+  [[ "$JSON_FORMAT" = false ]] && echo "Discovering Vault cluster nodes..." | color "$BLUE"
+  nodes_output=$(run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator members -format=json" | jq -r '.Nodes[].api_address' 2>/dev/null) || error_exit "Failed to discover nodes"
+  NODES=()
+  while IFS= read -r node; do [[ -n "$node" ]] && NODES+=("$node"); done <<< "$nodes_output"
+  [[ ${#NODES[@]} -eq 0 ]] && error_exit "No Vault nodes discovered"
+  log "INFO" "Discovered ${#NODES[@]} nodes"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "Discovered nodes:" | color "$BLUE"
+    for NODE in "${NODES[@]}"; do echo "$NODE" | color "$YELLOW"; done
+  fi
+}
+
+get_vault_status() {
+  local node="$1"; log "DEBUG" "Getting status for node: $node"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Vault Status for $node ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_ADDR=$node VAULT_TOKEN=$VAULT_TOKEN vault status 2>&1" | colorize_vault_status; then
+      echo "Failed to get status for $node" | color "$RED"
+    fi
+    echo ""
+  else
+    if ! run_with_timeout "$TIMEOUT" "VAULT_ADDR=$node VAULT_TOKEN=$VAULT_TOKEN vault status -format=json 2>&1"; then
+      echo "{}"
+    fi
+  fi
+}
+
+colorize_vault_status() {
+  while IFS= read -r line; do
+    if [[ $line == "Key"* || $line == "---"* ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      key=$(echo "$line" | awk -F'[ ]{2,}' '{print $1}')
+      value=$(echo "$line" | awk -F'[ ]{2,}' '{print $2}')
+      printf "%-40s" "$key" | color "$BLUE"; printf "%s\n" "$value" | color "$GREEN"
+    fi
+  done
+}
+
+get_vault_operator_members() {
+  log "DEBUG" "Getting Vault operator members"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Vault Operator Members ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator members 2>&1" | colorize_vault_operator_members; then
+      echo "Failed to get Vault operator members" | color "$RED"
+    fi
+    echo ""
+  else
+    local output
+    if ! output=$(run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator members -format=json 2>&1"); then
+      echo "{\"Nodes\": []}"
+    else
+      if echo "$output" | jq '.' >/dev/null 2>&1; then echo "$output"; else echo "{\"Nodes\": []}"; fi
+    fi
+  fi
+}
+
+colorize_vault_operator_members() {
+  while IFS= read -r line; do
+    if [[ $line == "Host Name"* || $line == "---------"* ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      host_name=$(echo "$line" | awk '{print $1}')
+      api_address=$(echo "$line" | awk '{print $2}')
+      cluster_address=$(echo "$line" | awk '{print $3}')
+      active_node=$(echo "$line" | awk '{print $4}')
+      version=$(echo "$line" | awk '{print $5}')
+      upgrade_version=$(echo "$line" | awk '{print $6}')
+      redundancy_zone=$(echo "$line" | awk '{print $7}')
+      last_echo=$(echo "$line" | awk '{print $8}')
+      if [[ $active_node == "true" ]]; then
+        printf "%-18s %-30s %-30s %-12s %-9s %-17s %-17s %-20s\n" \
+          "$host_name" "$api_address" "$cluster_address" "$active_node" "$version" "$upgrade_version" "$redundancy_zone" "$last_echo" | color "$PINK"
+      else
+        printf "%-18s %-30s %-30s %-12s %-9s %-17s %-17s %-20s\n" \
+          "$host_name" "$api_address" "$cluster_address" "$active_node" "$version" "$upgrade_version" "$redundancy_zone" "$last_echo" | color "$GREEN"
+      fi
+    fi
+  done
+}
+
+get_vault_license() {
+  log "DEBUG" "Getting Vault license"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Vault License ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault license get 2>&1" | colorize_vault_license; then
+      echo "Failed to get Vault license" | color "$RED"
+    fi
+    echo ""
+  else
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault license get -format=json 2>&1" | jq '.data.autoloaded // {}'; then
+      echo "{}"
+    fi
+  fi
+}
+
+colorize_vault_license() {
+  while IFS= read -r line; do
+    if [[ $line == "Key"* || $line == "---"* ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      key=$(echo "$line" | awk '{print $1}')
+      value=$(echo "$line" | awk '{sub($1 FS, ""); print}')
+      if [[ -z "$value" ]]; then echo "$line" | color "$BLUE"
+      else echo -n "$key " | color "$BLUE"; echo "$value" | color "$GREEN"; fi
+    fi
+  done
+}
+
+get_raft_autopilot_state() {
+  log "DEBUG" "Getting Raft autopilot state"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Raft Autopilot State ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot state 2>&1" | colorize_autopilot_state; then
+      echo "Failed to get Raft autopilot state" | color "$RED"
+    fi
+    echo ""
+  else
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot state -format=json 2>&1"; then
+      echo "{}"
+    fi
+  fi
+}
+
+colorize_autopilot_state() {
+  while IFS= read -r line; do
+    if [[ $line == "Voters:"* || $line == "Servers:"* || $line == "Upgrade Info:"* ]]; then
+      echo "$line" | color "$YELLOW"
+    elif [[ $line == *":"* ]]; then
+      key=$(echo "$line" | awk -F: '{print $1}')
+      value=$(echo "$line" | awk -F: '{print $2}' | sed 's/^[[:space:]]*//')
+      echo -n "${key}:" | color "$BLUE"; echo " ${value}" | color "$GREEN"
+    elif [[ $line == *" "* ]]; then
+      echo "$line" | color "$GREEN"
+    else
+      echo "$line"
+    fi
+  done
+}
+
+get_raft_autopilot_config() {
+  log "DEBUG" "Getting Raft autopilot config"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Raft Autopilot Config ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot get-config 2>&1" | colorize_output_autopilot_config; then
+      echo "Failed to get Raft autopilot config" | color "$RED"
+    fi
+    echo ""
+  else
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot get-config -format=json 2>&1"; then
+      echo "{}"
+    fi
+  fi
+}
+
+colorize_output_autopilot_config() {
+  while IFS= read -r line; do
+    if [[ $line == "Key"* || $line == "---"* ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      key=$(echo "$line" | awk '{print substr($0, 1, 34)}')
+      value=$(echo "$line" | awk '{print substr($0, 35)}')
+      echo -n "$key" | color "$BLUE"; echo "$value" | color "$GREEN"
+    fi
+  done
+}
+
+get_replication_status() {
+  log "DEBUG" "Getting replication status"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Replication DR Status ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault read sys/replication/dr/status 2>&1" | colorize_replication_status; then
+      echo "Failed to get DR replication status" | color "$RED"
+    fi
+    echo ""
+    echo "=== Replication Performance Status ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault read sys/replication/performance/status 2>&1" | colorize_replication_status; then
+      echo "Failed to get performance replication status" | color "$RED"
+    fi
+    echo ""
+  else
+    echo '"replication": {'
+    echo '"dr_status": '
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/dr/status 2>/dev/null" | jq '.data // {}'; then
+      echo '{}'
+    fi
+    echo ','
+    echo '"performance_status": '
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/performance/status 2>/dev/null" | jq '.data // {}'; then
+      echo '{}'
+    fi
+    echo '}'
+  fi
+}
+
+colorize_replication_status() {
+  while IFS= read -r line; do
+    if [[ $line == "Key"* || $line == "---"* ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      key=$(echo "$line" | awk '{print $1}')
+      value=$(echo "$line" | awk '{sub($1 FS, ""); print}')
+      if [[ -z "$value" ]]; then echo "$line" | color "$BLUE"
+      else echo -n "$key " | color "$BLUE"; echo "$value" | color "$GREEN"; fi
+    fi
+  done
+}
+
+list_audit_devices() {
+  log "DEBUG" "Listing audit devices"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Audit Devices ===" | color "$RED"
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault audit list -detailed 2>&1" | colorize_audit_devices; then
+      echo "Failed to list audit devices" | color "$RED"
+    fi
+    echo ""
+  else
+    if ! run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault audit list -detailed -format=json 2>&1"; then
+      echo "{}"
+    fi
+  fi
+}
+
+colorize_audit_devices() {
+  local line_number=0
+  while IFS= read -r line; do
+    ((line_number++))
+    if [[ $line_number -eq 1 ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      key=$(echo "$line" | awk '{print $1}')
+      value=$(echo "$line" | awk '{sub($1 FS, ""); print}')
+      if [[ -z "$value" ]]; then echo "$line" | color "$BLUE"
+      else echo -n "$key " | color "$BLUE"; echo "$value" | color "$GREEN"; fi
+    fi
+  done
+}
+
+collect_json_data_parallel() {
+  log "INFO" "Collecting JSON data in parallel"
+  local status_file=$(mktemp) peers_file=$(mktemp) members_file=$(mktemp) license_file=$(mktemp)
+  local autopilot_state_file=$(mktemp) autopilot_config_file=$(mktemp) replication_file=$(mktemp) audit_file=$(mktemp)
+  temp_files=("$status_file" "$peers_file" "$members_file" "$license_file" "$autopilot_state_file" "$autopilot_config_file" "$replication_file" "$audit_file")
+
+  discover_nodes >/dev/null
+
+  {
+    echo '"node_status": {'; first_node=true
+    for NODE in "${NODES[@]}"; do
+      [[ "$first_node" = false ]] && echo ','
+      first_node=false
+      echo "\"$NODE\": "
+      VAULT_ADDR=$NODE VAULT_TOKEN=$VAULT_TOKEN vault status -format=json 2>/dev/null || echo '{}'
+    done
+    echo '}'
+  } > "$status_file" &
+
+  {
+    echo '"raft_peers": '
+    local cli_parsed
+    if cli_parsed=$(parse_raft_list_peers_cli); then
+      echo '{"cli_parsed": '"$cli_parsed"'}'
+    else
+      local output
+      if ! output=$(run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers -format=json 2>&1"); then
+        echo "{}"
+      else
+        if echo "$output" | jq '.' >/dev/null 2>&1; then echo "$output"; else echo "{}"; fi
+      fi
+    fi
+  } > "$peers_file" &
+
+  {
+    echo '"operator_members": '
+    local output
+    if ! output=$(run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator members -format=json 2>&1"); then
+      echo "{\"Nodes\": []}"
+    else
+      if echo "$output" | jq '.' >/dev/null 2>&1; then echo "$output"; else echo "{\"Nodes\": []}"; fi
+    fi
+  } > "$members_file" &
+
+  { echo '"license": '; run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault license get -format=json 2>/dev/null" | jq '.data.autoloaded // {}' || echo '{}'; } > "$license_file" &
+  { echo '"autopilot_state": '; run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot state -format=json 2>/dev/null" || echo '{}'; } > "$autopilot_state_file" &
+  { echo '"autopilot_config": '; run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot get-config -format=json 2>/dev/null" || echo '{}'; } > "$autopilot_config_file" &
+  {
+    echo '"replication": {'; echo '"dr_status": '
+    run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/dr/status 2>/dev/null" | jq '.data // {}' || echo '{}'
+    echo ','; echo '"performance_status": '
+    run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/performance/status 2>/dev/null" | jq '.data // {}' || echo '{}'
+    echo '}'
+  } > "$replication_file" &
+  { echo '"audit_devices": '; run_with_timeout "$TIMEOUT" "VAULT_TOKEN=$VAULT_TOKEN vault audit list -detailed -format=json 2>/dev/null" || echo '{}'; } > "$audit_file" &
+
+  wait
+
+  local temp_output=$(mktemp); temp_files+=("$temp_output")
+  {
+    echo '{'
+    cat "$status_file"; echo ','
+    cat "$peers_file"; echo ','
+    cat "$members_file"; echo ','
+    cat "$license_file"; echo ','
+    cat "$autopilot_state_file"; echo ','
+    cat "$autopilot_config_file"; echo ','
+    cat "$replication_file"; echo ','
+    cat "$audit_file"
+    echo '}'
+  } > "$temp_output"
+
+  jq '.' "$temp_output" >/dev/null 2>&1 || error_exit "Invalid JSON generated"
+  cat "$temp_output"
+  log "INFO" "JSON data collection complete"
+}
+
+main() {
+  log "INFO" "Starting VaultX"
+  check_dependencies
+  handle_vault_token
+  temp_files=()
+
+  if [[ -n "$EXPORT_FILE" ]]; then
+    JSON_FORMAT=true
+    log "INFO" "Exporting data to $EXPORT_FILE"
+    if ! json_output=$(collect_json_data_parallel); then error_exit "Failed to collect Vault data"; fi
+    echo "$json_output" > "$EXPORT_FILE"
+    echo "Data exported to $EXPORT_FILE" | color "$GREEN"
+    log "INFO" "Data exported successfully"
+    exit 0
+  else
+    log "INFO" "Starting normal execution mode"
+    discover_nodes
+    if [[ "$JSON_FORMAT" = true ]]; then
+      collect_json_data_parallel
+    else
+      for NODE in "${NODES[@]}"; do get_vault_status "$NODE"; done
+      get_raft_list_peers
+      get_vault_operator_members
+      get_vault_license
+      get_raft_autopilot_state
+      get_raft_autopilot_config
+      get_replication_status
+      list_audit_devices
+    fi
+  fi
+  log "INFO" "Completed successfully"
+}
+
+main
