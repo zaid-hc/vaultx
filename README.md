@@ -10,11 +10,9 @@ VaultX is a bash-based CLI tool designed to streamline Vault cluster diagnostics
 
 - 🔍 **Comprehensive Diagnostics**: Collects all essential Vault cluster information in one command
 - 🎨 **Colorized Output**: Beautiful, easy-to-read CLI output with color-coded status indicators
-- 📊 **JSON Export**: Export diagnostic data in JSON format for programmatic processing
+- 📊 **Pretty-Printed JSON**: Export diagnostic data in beautifully formatted JSON
 - ⚡ **Parallel Data Collection**: Fast data gathering using parallel execution
 - 🔐 **Secure Authentication**: Supports VAULT_TOKEN environment variable or interactive token input
-- ⏱️ **Configurable Timeouts**: Adjust timeouts for slow or distributed clusters
-- 📝 **Detailed Logging**: Built-in logging system for debugging and audit trails
 
 ## What VaultX Collects
 
@@ -32,7 +30,7 @@ VaultX is a bash-based CLI tool designed to streamline Vault cluster diagnostics
 VaultX requires the following tools to be installed:
 
 - `vault` - HashiCorp Vault CLI
-- `jq` - JSON processor for parsing responses
+- `jq` - JSON processor for parsing and pretty-printing
 - `bash` - Version 4.0 or higher recommended
 
 ## Installation
@@ -63,53 +61,32 @@ vaultx
 
 ### JSON Output
 
-Output diagnostics in JSON format:
+Output diagnostics in pretty-printed JSON format:
 ```bash
 vaultx -format=json
 ```
 
 ### Export to File
 
-Export diagnostic data to a file:
+Export diagnostic data to a file (automatically pretty-printed):
 ```bash
-vaultx --export=diagnostics.json
-```
-
-### Custom Timeout
-
-Increase timeout for slow clusters:
-```bash
-vaultx --timeout=10
-```
-
-### Custom Config File
-
-Use a custom configuration file:
-```bash
-vaultx --config=/path/to/config.conf
+vaultx -export=diagnostics.json
 ```
 
 ### Help
 
 Display help message:
 ```bash
-vaultx --help
+vaultx -help
 ```
 
-## Configuration
+## Command-Line Options
 
-VaultX can be configured using a configuration file at `~/.vaultx.conf`. Available options:
-
-```bash
-# Default timeout for Vault operations (seconds)
-TIMEOUT=5
-
-# Log level: DEBUG, INFO, WARN, ERROR
-LOG_LEVEL="INFO"
-
-# Log file location
-LOG_FILE="${HOME}/.vaultx.log"
-```
+| Flag | Description |
+|------|-------------|
+| `-format=json` | Output in pretty-printed JSON format |
+| `-export=FILE` | Export data to specified file |
+| `-help` | Show help message |
 
 ## Authentication
 
@@ -160,7 +137,7 @@ node-2     10.0.1.11:8201      follower    true
 node-3     10.0.1.12:8201      follower    true
 ```
 
-### JSON Output
+### JSON Output (Pretty-Printed)
 
 ```json
 {
@@ -169,15 +146,29 @@ node-3     10.0.1.12:8201      follower    true
       "type": "shamir",
       "initialized": true,
       "sealed": false,
-      ...
+      "ha_enabled": true,
+      "is_self": true,
+      "active_time": "2024-01-15T10:30:00Z"
     }
   },
-  "raft_peers": {...},
+  "raft_peers": {
+    "cli_parsed": [
+      {
+        "node": "node-1",
+        "address": "10.0.1.10:8201",
+        "state": "leader",
+        "voter": "true"
+      }
+    ]
+  },
   "operator_members": {...},
   "license": {...},
   "autopilot_state": {...},
   "autopilot_config": {...},
-  "replication": {...},
+  "replication": {
+    "dr_status": {...},
+    "performance_status": {...}
+  },
   "audit_devices": {...}
 }
 ```
@@ -205,7 +196,6 @@ yum install jq
 - Verify your VAULT_TOKEN is valid
 - Check that VAULT_ADDR points to the correct Vault server
 - Ensure network connectivity to the Vault cluster
-- Try increasing the timeout: `vaultx --timeout=10`
 
 ### Permission Errors
 Ensure your Vault token has sufficient permissions to read:
@@ -214,19 +204,6 @@ Ensure your Vault token has sufficient permissions to read:
 - `sys/replication/dr/status`
 - `sys/replication/performance/status`
 - `sys/audit`
-
-## Logging
-
-VaultX maintains logs at `~/.vaultx.log` by default. Log levels:
-- **DEBUG**: Detailed diagnostic information
-- **INFO**: General informational messages
-- **WARN**: Warning messages
-- **ERROR**: Error messages
-
-View logs:
-```bash
-tail -f ~/.vaultx.log
-```
 
 ## Contributing
 
@@ -242,14 +219,19 @@ For issues, questions, or contributions, please visit the [GitHub repository](ht
 
 ## Changelog
 
+### v1.1.0 (Latest)
+- ✅ Added automatic JSON pretty-printing with `jq`
+- ✅ Removed timeout functionality (simplified execution)
+- ✅ Removed config file support (simplified configuration)
+- ✅ Updated CLI flags to use single dash convention
+- ✅ Improved error handling
+
 ### v1.0.0
 - Initial release
 - Multi-node cluster support
 - Colorized CLI output
 - JSON export functionality
 - Parallel data collection
-- Configurable timeouts
-- Comprehensive error handling
 
 ---
 
