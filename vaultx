@@ -1,5 +1,199 @@
-# Updated vaultx file to remove --config functionality
+#!/usr/bin/env bash
 
-# The CONFIG_FILE variable and loading logic has been removed.
+# VaultX - Vault Cluster Diagnostic Tool
+# Exit on error, pipe failures
+set -o pipefail
 
-# Code changes would appear here...
+# Define colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+PINK='\033[0;35m'
+
+# Default configuration
+LOG_LEVEL="INFO"
+LOG_FILE="${HOME}/.vaultx.log"
+
+# ---------- Logging ----------
+
+log() {
+  local level="$1"; local message="$2"; local timestamp
+  timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+  local level_num
+  case "$level" in
+    DEBUG) level_num=0;; INFO) level_num=1;; WARN) level_num=2;; ERROR) level_num=3;; *) level_num=1;;
+  esac
+  local config_level_num
+  case "$LOG_LEVEL" in
+    DEBUG) config_level_num=0;; INFO) config_level_num=1;; WARN) config_level_num=2;; ERROR) config_level_num=3;; *) config_level_num=1;;
+  esac
+  if [[ $level_num -ge $config_level_num ]]; then
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    [[ "$level" = "ERROR" ]] && echo "[$level] $message" >&2
+  fi
+}
+
+error_exit() { log "ERROR" "$1"; echo -e "${RED}ERROR: $1${NC}" >&2; cleanup; exit 1; }
+
+cleanup() {
+  log "DEBUG" "Running cleanup"
+  if [[ -n "${temp_files[@]:-}" ]]; then rm -f "${temp_files[@]}" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+
+is_piped() { [[ ! -t 1 ]]; }
+color() { 
+  if is_piped; then 
+    cat
+  else 
+    echo -en "$1"
+    cat
+    echo -en "$NC"
+  fi
+}
+
+check_dependencies() {
+  log "INFO" "Checking dependencies"
+  local missing_deps=()
+  for cmd in vault jq; do
+    command -v "$cmd" >/dev/null 2>&1 || missing_deps+=("$cmd")
+  done
+  [[ ${#missing_deps[@]} -gt 0 ]] && error_exit "Missing required dependencies: ${missing_deps[*]}"
+  log "INFO" "All dependencies satisfied"
+}
+
+JSON_FORMAT=false
+EXPORT_FILE=""
+
+show_help() {
+  cat << EOF
+VaultX - A diagnostic tool for HashiCorp Vault clusters
+
+USAGE:
+  vaultx [OPTIONS]
+
+OPTIONS:
+  -format=json       Output in JSON format (pretty-printed)
+  -export=FILE       Export data to specified file
+  -help              Show this help message
+
+EXAMPLES:
+  vaultx                              # Colorized CLI output
+  vaultx -format=json                 # Pretty-printed JSON output to stdout
+  vaultx -export=diagnostics.json     # Export to file
+
+DESCRIPTION:
+  VaultX collects comprehensive diagnostic information from your Vault cluster
+  including node status, Raft configuration, license info, replication status,
+  and more. Perfect for generating support tickets or troubleshooting.
+
+ENVIRONMENT VARIABLES:
+  VAULT_ADDR         Vault server address (e.g., http://127.0.0.1:8200)
+  VAULT_TOKEN        Vault authentication token
+EOF
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+    -format=json) JSON_FORMAT=true ;; 
+    -export=*) EXPORT_FILE="${1#*=}" ;;
+    -help|--help) show_help; exit 0 ;;
+    *) echo "Unknown parameter passed: $1"; show_help; exit 1 ;;
+  esac
+  shift
+done
+
+handle_vault_connection() {
+  # Check VAULT_ADDR
+  if [[ -z "${VAULT_ADDR:-}" ]]; then
+    read -p "Enter Vault address (e.g., http://127.0.0.1:8200): " VAULT_ADDR
+    [[ -z "$VAULT_ADDR" ]] && error_exit "Vault address is required"
+  else
+    if [[ "$JSON_FORMAT" = false ]]; then echo "Using VAULT_ADDR from environment variable: $VAULT_ADDR" | color "$GREEN"; fi
+  fi
+  export VAULT_ADDR
+  log "INFO" "Vault address set to: $VAULT_ADDR"
+
+  # Check VAULT_TOKEN
+  if [[ -z "${VAULT_TOKEN:-}" ]]; then
+    read -sp "Enter your Vault token: " VAULT_TOKEN; echo ""
+    [[ -z "$VAULT_TOKEN" ]] && error_exit "Vault token is required"
+  else
+    if [[ "$JSON_FORMAT" = false ]]; then echo "Using VAULT_TOKEN from environment variable." | color "$GREEN"; fi
+  fi
+  export VAULT_TOKEN
+  log "INFO" "Vault token provided"
+
+  # Validate connection
+  if ! VAULT_TOKEN=$VAULT_TOKEN vault token lookup -format=json >/dev/null 2>&1; then
+    error_exit "Invalid Vault token or connection failed. Please check VAULT_ADDR ($VAULT_ADDR) and VAULT_TOKEN"
+  fi
+  log "INFO" "Vault connection validated successfully"
+}
+
+parse_raft_list_peers_cli() {
+  local output
+  output=$(VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers 2>&1) || return 1
+  local parsed_output='['; local first_row=true; local in_header=true
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$in_header" = true ]]; then
+      [[ "$line" == *"----"* ]] && in_header=false
+      continue
+    fi
+    local node=$(echo "$line" | awk '{print $1}')
+    local address=$(echo "$line" | awk '{print $2}')
+    local state=$(echo "$line" | awk '{print $3}')
+    local voter=$(echo "$line" | awk '{print $4}')
+    [[ "$first_row" = false ]] && parsed_output+=', '
+    first_row=false
+    parsed_output+='{"node":"'"$node"'","address":"'"$address"'","state":"'"$state"'","voter":"'"$voter"'"}'
+  done <<< "$output"
+  parsed_output+=']'
+  echo "$parsed_output" | jq '.' >/dev/null 2>&1 || return 1
+  echo "$parsed_output"
+}
+
+get_raft_list_peers() {
+  log "DEBUG" "Getting Raft peers list"
+  if [[ "$JSON_FORMAT" = false ]]; then
+    echo "=== Raft List Peers ===" | color "$RED"
+    if ! VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers 2>&1 | colorize_raft_list_peers; then
+      echo "Failed to get Raft peers" | color "$RED"
+    fi
+    echo ""
+  else
+    local cli_parsed
+    if cli_parsed=$(parse_raft_list_peers_cli); then
+      echo '{"cli_parsed": '"$cli_parsed"'}'; return
+    fi
+    local output
+    if ! output=$(VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers -format=json 2>&1); then
+      echo "{}"
+    else
+      if echo "$output" | jq '.' >/dev/null 2>&1; then echo "$output"; else echo "{}"; fi
+    fi
+  fi
+}
+
+colorize_raft_list_peers() {
+  while IFS= read -r line; do
+    if [[ $line == "Node"* || $line == "----"* ]]; then
+      echo "$line" | color "$YELLOW"
+    else
+      node=$(echo "$line" | awk '{print $1}')
+      address=$(echo "$line" | awk '{print $2}')
+      state=$(echo "$line" | awk '{print $3}')
+      voter=$(echo "$line" | awk '{print $4}')
+      if [[ $state == "leader" ]]; then
+        printf "% -10s %-21s %-11s %-5s\n" "$node" "$address" "$state" "$voter" | color "$PINK"
+      else
+        printf "% -10s %-21s %-11s %-5s\n" "$node" "$address" "$state" "$voter" | color "$GREEN"
+      fi
+    fi
+  done
+}
+
+# The rest of the script continued...
