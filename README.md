@@ -93,7 +93,6 @@ vaultx -help
 https://github.com/user-attachments/assets/b7d5a6ec-b395-4be8-879e-c245506cec8b
 
 
-
 ## Authentication
 
 VaultX supports two authentication methods:
@@ -233,10 +232,10 @@ User ↔ vaultx-agent (Python CLI) ↔ LLM (Ollama/local)
 
 ### Installation
 
-1. Install the Python dependencies:
+1. Create a virtual environment and install the Python dependencies:
 
 ```bash
-pip install -r agent/requirements.txt
+python3 -m venv venv && source venv/bin/activate && pip3 install -r agent/requirements.txt
 ```
 
 2. Make the entry-point script executable (if not already):
