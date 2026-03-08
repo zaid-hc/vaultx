@@ -334,8 +334,6 @@ For issues, questions, or contributions, please visit the [GitHub repository](ht
 
 ### v1.1.0 (Latest)
 - ✅ Added automatic JSON pretty-printing with `jq`
-- ✅ Removed timeout functionality (simplified execution)
-- ✅ Removed config file support (simplified configuration)
 - ✅ Updated CLI flags to use single dash convention
 - ✅ Improved error handling
 
