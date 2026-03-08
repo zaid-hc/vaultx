@@ -167,13 +167,16 @@ get_raft_list_peers() {
   else
     local cli_parsed
     if cli_parsed=$(parse_raft_list_peers_cli); then
-      echo '{"cli_parsed": '"$cli_parsed"'}'; return
+      local formatted
+      formatted=$(jq -n --argjson data "$cli_parsed" '{"cli_parsed": $data}' 2>/dev/null) || formatted=""
+      echo "${formatted:-{}}"; return
     fi
-    local output
+    local output formatted
     if ! output=$(VAULT_TOKEN=$VAULT_TOKEN vault operator raft list-peers -format=json 2>&1); then
       echo "{}"
     else
-      if echo "$output" | jq '.' >/dev/null 2>&1; then echo "$output"; else echo "{}"; fi
+      formatted=$(echo "$output" | jq '.' 2>/dev/null) || formatted=""
+      echo "${formatted:-{}}"
     fi
   fi
 }
@@ -218,9 +221,10 @@ get_vault_status() {
     fi
     echo ""
   else
-    if ! VAULT_ADDR=$node VAULT_TOKEN=$VAULT_TOKEN vault status -format=json 2>&1; then
-      echo "{}"
-    fi
+    local output formatted
+    output=$(VAULT_ADDR=$node VAULT_TOKEN=$VAULT_TOKEN vault status -format=json 2>&1) || true
+    formatted=$(echo "$output" | jq '.' 2>/dev/null) || formatted=""
+    echo "${formatted:-{}}"
   fi
 }
 
@@ -245,11 +249,12 @@ get_vault_operator_members() {
     fi
     echo ""
   else
-    local output
+    local output formatted
     if ! output=$(VAULT_TOKEN=$VAULT_TOKEN vault operator members -format=json 2>&1); then
       echo "{\"Nodes\": []}"
     else
-      if echo "$output" | jq '.' >/dev/null 2>&1; then echo "$output"; else echo "{\"Nodes\": []}"; fi
+      formatted=$(echo "$output" | jq '.' 2>/dev/null) || formatted=""
+      echo "${formatted:-{\"Nodes\": []}}"
     fi
   fi
 }
@@ -287,9 +292,10 @@ get_vault_license() {
     fi
     echo ""
   else
-    if ! VAULT_TOKEN=$VAULT_TOKEN vault license get -format=json 2>&1 | jq '.data.autoloaded // {}'; then
-      echo "{}"
-    fi
+    local output formatted
+    output=$(VAULT_TOKEN=$VAULT_TOKEN vault license get -format=json 2>&1) || true
+    formatted=$(echo "$output" | jq '.data.autoloaded // {}' 2>/dev/null) || formatted=""
+    echo "${formatted:-{}}"
   fi
 }
 
@@ -315,9 +321,10 @@ get_raft_autopilot_state() {
     fi
     echo ""
   else
-    if ! VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot state -format=json 2>&1; then
-      echo "{}"
-    fi
+    local output formatted
+    output=$(VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot state -format=json 2>&1) || true
+    formatted=$(echo "$output" | jq '.' 2>/dev/null) || formatted=""
+    echo "${formatted:-{}}"
   fi
 }
 
@@ -346,9 +353,10 @@ get_raft_autopilot_config() {
     fi
     echo ""
   else
-    if ! VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot get-config -format=json 2>&1; then
-      echo "{}"
-    fi
+    local output formatted
+    output=$(VAULT_TOKEN=$VAULT_TOKEN vault operator raft autopilot get-config -format=json 2>&1) || true
+    formatted=$(echo "$output" | jq '.' 2>/dev/null) || formatted=""
+    echo "${formatted:-{}}"
   fi
 }
 
@@ -378,17 +386,10 @@ get_replication_status() {
     fi
     echo ""
   else
-    echo '"replication": {'
-    echo '"dr_status": '
-    if ! VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/dr/status 2>/dev/null | jq '.data // {}'; then
-      echo '{}'
-    fi
-    echo ','
-    echo '"performance_status": '
-    if ! VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/performance/status 2>/dev/null | jq '.data // {}'; then
-      echo '{}'
-    fi
-    echo '}'
+    local dr_status perf_status
+    dr_status=$(VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/dr/status 2>/dev/null | jq '.data // {}' 2>/dev/null) || dr_status='{}'
+    perf_status=$(VAULT_TOKEN=$VAULT_TOKEN vault read -format=json sys/replication/performance/status 2>/dev/null | jq '.data // {}' 2>/dev/null) || perf_status='{}'
+    jq -n --argjson dr "$dr_status" --argjson perf "$perf_status" '{"dr_status": $dr, "performance_status": $perf}'
   fi
 }
 
@@ -414,9 +415,10 @@ list_audit_devices() {
     fi
     echo ""
   else
-    if ! VAULT_TOKEN=$VAULT_TOKEN vault audit list -detailed -format=json 2>&1; then
-      echo "{}"
-    fi
+    local output formatted
+    output=$(VAULT_TOKEN=$VAULT_TOKEN vault audit list -detailed -format=json 2>&1) || true
+    formatted=$(echo "$output" | jq '.' 2>/dev/null) || formatted=""
+    echo "${formatted:-{}}"
   fi
 }
 
