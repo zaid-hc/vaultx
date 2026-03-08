@@ -88,6 +88,12 @@ vaultx -help
 | `-export=FILE` | Export data to specified file |
 | `-help` | Show help message |
 
+
+
+https://github.com/user-attachments/assets/b7d5a6ec-b395-4be8-879e-c245506cec8b
+
+
+
 ## Authentication
 
 VaultX supports two authentication methods:
