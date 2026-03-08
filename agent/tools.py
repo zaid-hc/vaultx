@@ -70,21 +70,27 @@ def collect_diagnostics() -> dict[str, Any]:
         print(f"Error running vaultx: {exc}", file=sys.stderr)
         return {}
 
-    if result.returncode != 0:
-        print(
-            f"Warning: vaultx exited with code {result.returncode}.\n"
-            f"Stderr: {result.stderr.strip()}",
-            file=sys.stderr,
-        )
-
     output = result.stdout.strip()
     if not output:
-        print("Warning: vaultx produced no output.", file=sys.stderr)
+        if result.returncode != 0:
+            print(
+                f"Warning: vaultx exited with code {result.returncode}.\n"
+                f"Stderr: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+        else:
+            print("Warning: vaultx produced no output.", file=sys.stderr)
         return {}
 
     try:
         return json.loads(output)
     except json.JSONDecodeError as exc:
+        if result.returncode != 0:
+            print(
+                f"Warning: vaultx exited with code {result.returncode}.\n"
+                f"Stderr: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
         print(f"Error: Could not parse vaultx JSON output: {exc}", file=sys.stderr)
         return {}
 
