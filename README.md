@@ -263,6 +263,9 @@ Example questions:
 
 Type `refresh` to re-collect diagnostic data, or `quit` / `Ctrl-C` to exit.
 
+<img width="1803" height="555" alt="vault-agent" src="https://github.com/user-attachments/assets/9e39f0fb-a482-443a-8acf-adca63fb44d6" />
+
+
 #### Report / support-ticket generation
 
 Automatically collect all diagnostics, analyze them with the LLM, and produce a comprehensive Markdown report:
