@@ -126,7 +126,7 @@ preserving enough information to validate correctness:
 | `vault.hashicorp.com` | `x.hashicorp.com` |
 | `https://vault.hashicorp.com:8200/v1` | `https://x.hashicorp.com:8200/v1` |
 | `localhost` / `127.0.0.1` | *(unchanged)* |
-| `[2001:db8::1]` | `[REDACTED_IPv6]` *(v1)* |
+| `[2001:db8::1]` | `[REDACTED_IPv6]` *(IPv6 loopback `::1` is preserved; all other IPv6 hosts are fully redacted)* |
 
 ### Before / After Example
 

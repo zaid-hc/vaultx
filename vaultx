@@ -134,17 +134,19 @@ mask_host() {
     return 0
   fi
 
-  # IPv6 (contains colon): full redact for v1
-  if [[ "$inner_host" == *":"* ]]; then
+  # IPv6 (contains two or more colons — IPv6 requires at least "::" or multiple ":"):
+  # A plain host:port has exactly one colon, so this check correctly excludes those.
+  if [[ "$inner_host" == *":"*":"* ]]; then
     echo "[REDACTED_IPv6]"
     return 0
   fi
 
-  # DNS/FQDN: keep last two labels
+  # DNS/FQDN: keep last two labels (pure bash, no subprocesses)
   if [[ "$inner_host" == *"."* ]]; then
-    local last_two
-    last_two=$(echo "$inner_host" | rev | cut -d'.' -f1-2 | rev)
-    echo "x.${last_two}"
+    local without_last="${inner_host%.*}"   # strip last label
+    local last="${inner_host##*.}"          # keep last label
+    local second_last="${without_last##*.}" # keep second-to-last label
+    echo "x.${second_last}.${last}"
     return 0
   fi
 
@@ -289,7 +291,8 @@ VAULT_ADDR MASKING (host sanitized, structure preserved):
   URL:        https://vault.hashicorp.com:8200/v1
                                           ->  https://x.hashicorp.com:8200/v1
   Loopback:   localhost / 127.0.0.1       ->  unchanged
-  IPv6:       [2001:db8::1]               ->  [REDACTED_IPv6]  (v1 behavior)
+  IPv6:       [2001:db8::1]               ->  [REDACTED_IPv6]
+              (IPv6 loopback ::1 is preserved; all other IPv6 hosts are fully redacted)
 
 NOTE: Log sanitization is planned for a future release.
 

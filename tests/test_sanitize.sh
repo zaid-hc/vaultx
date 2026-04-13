@@ -6,7 +6,7 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VAULTX="${SCRIPT_DIR}/../vaultx"
-TMPDIR_BASE="$(mktemp -d)"
+TMPDIR_BASE="$(mktemp -d)" || { echo "ERROR: failed to create temp dir" >&2; exit 1; }
 PASS=0
 FAIL=0
 
