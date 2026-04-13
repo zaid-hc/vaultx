@@ -13,6 +13,7 @@ VaultX is a bash-based CLI tool designed to streamline Vault cluster diagnostics
 - 📊 **Pretty-Printed JSON**: Export diagnostic data in beautifully formatted JSON
 - ⚡ **Parallel Data Collection**: Fast data gathering using parallel execution
 - 🔐 **Secure Authentication**: Supports VAULT_TOKEN environment variable or interactive token input
+- 🛡️ **Config Sanitization**: Strip sensitive values from config files before sharing with support
 
 ## What VaultX Collects
 
@@ -80,6 +81,89 @@ Display help message:
 vaultx -help
 ```
 
+## Config Sanitization
+
+Use `vaultx sanitize` to redact sensitive values from a Vault config file before
+sharing it with support teams.  No Vault connection or token is required.
+
+### Basic Usage
+
+```bash
+# Print sanitized config to stdout
+vaultx sanitize -config=config.hcl
+
+# Positional form (equivalent)
+vaultx sanitize config.hcl
+
+# Write sanitized output to a file
+vaultx sanitize -config=config.hcl -out=sanitized.hcl
+```
+
+### What Gets Redacted vs Masked
+
+**Fully redacted** (replaced with `***REDACTED***`) — keys matched case-insensitively:
+
+| Key |
+|-----|
+| `token` |
+| `auth_token` |
+| `api_key` |
+| `secret` |
+| `client_secret` |
+| `kms_key` |
+| `kms_key_id` |
+| `private_key` |
+| `password` |
+| `access_key` |
+| `secret_key` |
+
+**Masked** — `vault_addr` is never fully redacted; the host is obscured while
+preserving enough information to validate correctness:
+
+| Input | Output |
+|-------|--------|
+| `169.182.4.100` | `x.x.x.100` |
+| `vault.hashicorp.com` | `x.hashicorp.com` |
+| `https://vault.hashicorp.com:8200/v1` | `https://x.hashicorp.com:8200/v1` |
+| `localhost` / `127.0.0.1` | *(unchanged)* |
+| `[2001:db8::1]` | `[REDACTED_IPv6]` *(v1)* |
+
+### Before / After Example
+
+Config before:
+
+```hcl
+vault_addr   = "https://vault.hashicorp.com:8200"
+token        = "s.abc123"
+kms_key_id   = "arn:aws:kms:us-east-1:123:key/abcd"
+cluster_name = "production"
+
+seal "awskms" {
+  region     = "us-east-1"
+  kms_key_id = "arn:aws:kms:us-east-1:123:key/abcd"
+  access_key = "AKIAIOSFODNN7EXAMPLE"
+  secret_key = "wJalrXUtnFEMI/K7MDENG"
+}
+```
+
+Config after `vaultx sanitize`:
+
+```hcl
+vault_addr   = "https://x.hashicorp.com:8200"
+token        = "***REDACTED***"
+kms_key_id   = "***REDACTED***"
+cluster_name = "production"
+
+seal "awskms" {
+  region     = "us-east-1"
+  kms_key_id = "***REDACTED***"
+  access_key = "***REDACTED***"
+  secret_key = "***REDACTED***"
+}
+```
+
+> **Note:** Log sanitization is planned for a future release.
+
 ## Command-Line Options
 
 | Flag | Description |
@@ -87,6 +171,15 @@ vaultx -help
 | `-format=json` | Output in pretty-printed JSON format |
 | `-export=FILE` | Export data to specified file |
 | `-help` | Show help message |
+
+### Sanitize Subcommand Options
+
+| Flag | Description |
+|------|-------------|
+| `-config=FILE` | Path to the config file to sanitize (flag form) |
+| `<FILE>` | Path to the config file to sanitize (positional) |
+| `-out=FILE` | Write sanitized output to FILE (default: stdout) |
+| `-help` | Show sanitize help message |
 
 
 
