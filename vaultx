@@ -106,13 +106,18 @@ EOF
 # Sensitive key names matched case-insensitively
 SANITIZE_SENSITIVE_PATTERN='^(token|auth_token|api_key|secret|client_secret|kms_key|kms_key_id|private_key|password|access_key|secret_key)$'
 
+# Address/URL key names that should have their hostname DNS-anonymized
+SANITIZE_ADDR_PATTERN='^(vault_addr|api_addr|cluster_addr|cluster_address|address|redirect_addr)$'
+
 # mask_host <host>
-# Masks a bare hostname/IP for vault_addr sanitization.
-#   IPv4          -> x.x.x.<last-octet>
-#   DNS/FQDN      -> x.<last-two-labels>
-#   Single-label  -> x
-#   localhost/127.0.0.1/::1 -> unchanged
-#   IPv6          -> [REDACTED_IPv6]
+# Masks a bare hostname/IP for address sanitization.
+#   IPv4               -> x.x.x.<last-octet>
+#   DNS 2-label        -> unchanged  (e.g., hashicorp.com -> hashicorp.com)
+#   DNS 3+ labels      -> replace each subdomain label with x
+#                         (e.g., prd.ec2.hashicorp.com -> x.x.hashicorp.com)
+#   Single-label       -> x
+#   localhost/127.0.0.1/0.0.0.0/::1 -> unchanged
+#   IPv6               -> [REDACTED_IPv6]
 mask_host() {
   local host="$1"
 
@@ -122,8 +127,9 @@ mask_host() {
     inner_host="${host:1:${#host}-2}"
   fi
 
-  # Loopback / localhost: preserve as-is
-  if [[ "$inner_host" == "localhost" || "$inner_host" == "127.0.0.1" || "$inner_host" == "::1" ]]; then
+  # Loopback / localhost / wildcard bind: preserve as-is
+  if [[ "$inner_host" == "localhost" || "$inner_host" == "127.0.0.1" || \
+        "$inner_host" == "::1"       || "$inner_host" == "0.0.0.0" ]]; then
     echo "$host"
     return 0
   fi
@@ -141,12 +147,29 @@ mask_host() {
     return 0
   fi
 
-  # DNS/FQDN: keep last two labels (pure bash, no subprocesses)
+  # DNS/FQDN: replace each subdomain label with x, preserve the registrable domain
+  # (last two labels, e.g., hashicorp.com).
   if [[ "$inner_host" == *"."* ]]; then
-    local without_last="${inner_host%.*}"   # strip last label
-    local last="${inner_host##*.}"          # keep last label
-    local second_last="${without_last##*.}" # keep second-to-last label
-    echo "x.${second_last}.${last}"
+    local tld="${inner_host##*.}"          # last label (TLD)
+    local without_tld="${inner_host%.*}"   # all labels except TLD
+    local sld="${without_tld##*.}"         # second-to-last label (SLD)
+
+    # 2-label domain (e.g., hashicorp.com): already the registrable domain, no subdomain to mask
+    if [[ "$without_tld" != *"."* ]]; then
+      echo "$inner_host"
+      return 0
+    fi
+
+    # 3+ labels: build an x. prefix for every subdomain label (all but the last two labels)
+    local subdomain_part="${without_tld%.*}"  # everything before the SLD
+    local prefix="x."
+    local temp="$subdomain_part"
+    while [[ "$temp" == *"."* ]]; do
+      prefix="${prefix}x."
+      temp="${temp#*.}"
+    done
+
+    echo "${prefix}${sld}.${tld}"
     return 0
   fi
 
@@ -154,9 +177,10 @@ mask_host() {
   echo "x"
 }
 
-# mask_vault_addr <value>
-# Masks a vault_addr value: parses URL scheme/port/path and masks only the host.
-mask_vault_addr() {
+# mask_addr_value <value>
+# Masks an address value: parses URL scheme/port/path and masks only the host.
+# Handles: URL (scheme://host[:port][/path]), host:port, [IPv6]:port, plain host.
+mask_addr_value() {
   local value="$1"
 
   # URL with scheme://
@@ -192,9 +216,32 @@ mask_vault_addr() {
     return 0
   fi
 
-  # Plain host (no scheme)
+  # Bracketed IPv6 host with optional port: [addr] or [addr]:port
+  if [[ "$value" =~ ^\[([^\]]+)\](:[0-9]+)?$ ]]; then
+    local inner="${BASH_REMATCH[1]}"
+    local port_str="${BASH_REMATCH[2]:-}"
+    local masked
+    masked=$(mask_host "[$inner]")
+    echo "${masked}${port_str}"
+    return 0
+  fi
+
+  # host:port — plain IPv4 or DNS with a numeric port (single colon, port all-digits)
+  if [[ "$value" =~ ^([^:]+):([0-9]+)$ ]]; then
+    local host="${BASH_REMATCH[1]}"
+    local port="${BASH_REMATCH[2]}"
+    local masked
+    masked=$(mask_host "$host")
+    echo "${masked}:${port}"
+    return 0
+  fi
+
+  # Plain host (no scheme, no port)
   mask_host "$value"
 }
+
+# Keep the old name as an alias so existing call-sites remain valid.
+mask_vault_addr() { mask_addr_value "$@"; }
 
 # sanitize_line <line>
 # Processes one line of a config file: redacts sensitive keys, masks vault_addr.
@@ -217,19 +264,19 @@ sanitize_line() {
     local val="${BASH_REMATCH[5]}"
     local key_lower="${key,,}"
 
-    # vault_addr: mask (not fully redact)
-    if [[ "$key_lower" == "vault_addr" ]]; then
+    # Address/URL keys: mask hostname (not fully redact)
+    if [[ "$key_lower" =~ $SANITIZE_ADDR_PATTERN ]]; then
       local raw masked suffix
       if [[ "$val" =~ ^\"([^\"]*)\"(.*)$ ]]; then
         raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
-        masked=$(mask_vault_addr "$raw")
+        masked=$(mask_addr_value "$raw")
         echo "${indent}${key}${sp1}=${sp2}\"${masked}\"${suffix}"
       elif [[ "$val" =~ ^\'([^\']*)\'(.*)$ ]]; then
         raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
-        masked=$(mask_vault_addr "$raw")
+        masked=$(mask_addr_value "$raw")
         echo "${indent}${key}${sp1}=${sp2}'${masked}'${suffix}"
       else
-        masked=$(mask_vault_addr "$val")
+        masked=$(mask_addr_value "$val")
         echo "${indent}${key}${sp1}=${sp2}${masked}"
       fi
       return 0
@@ -285,14 +332,20 @@ REDACTED KEYS (replaced with ***REDACTED***):
   kms_key, kms_key_id, private_key, password, access_key, secret_key
   (matching is case-insensitive)
 
-VAULT_ADDR MASKING (host sanitized, structure preserved):
-  IPv4 host:  169.182.4.100               ->  x.x.x.100
-  DNS/FQDN:   vault.hashicorp.com         ->  x.hashicorp.com
-  URL:        https://vault.hashicorp.com:8200/v1
-                                          ->  https://x.hashicorp.com:8200/v1
-  Loopback:   localhost / 127.0.0.1       ->  unchanged
-  IPv6:       [2001:db8::1]               ->  [REDACTED_IPv6]
-              (IPv6 loopback ::1 is preserved; all other IPv6 hosts are fully redacted)
+ADDRESS MASKING (host DNS-anonymized, structure preserved):
+  Applies to: vault_addr, api_addr, cluster_addr, cluster_address, address,
+              redirect_addr  (matched case-insensitively)
+
+  IPv4 host:       169.182.4.100               ->  x.x.x.100
+  DNS 2-label:     hashicorp.com               ->  hashicorp.com  (unchanged)
+  DNS 3-label:     vault.hashicorp.com         ->  x.hashicorp.com
+  DNS 4-label:     prd.ec2.hashicorp.com       ->  x.x.hashicorp.com
+  URL:             https://vault.hashicorp.com:8200/v1
+                                               ->  https://x.hashicorp.com:8200/v1
+  host:port:       prd.ec2.hashicorp.com:8201  ->  x.x.hashicorp.com:8201
+  Loopback:        localhost / 127.0.0.1 / 0.0.0.0  ->  unchanged
+  IPv6:            [2001:db8::1]               ->  [REDACTED_IPv6]
+                   (IPv6 loopback ::1 is preserved; all other IPv6 hosts are fully redacted)
 
 NOTE: Log sanitization is planned for a future release.
 

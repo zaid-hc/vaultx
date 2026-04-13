@@ -175,7 +175,7 @@ assert_not_contains "DNS no full host"         "vault.hashicorp.com"            
 
 cfg=$(make_cfg cfg5b.hcl 'vault_addr = "vault.com"')
 out=$(run_sanitize "$cfg")
-assert_contains "two-label DNS masked" 'vault_addr = "x.vault.com"' "$out"
+assert_contains "two-label DNS unchanged" 'vault_addr = "vault.com"' "$out"
 
 cfg=$(make_cfg cfg5c.hcl 'vault_addr = "myvault"')
 out=$(run_sanitize "$cfg")
@@ -198,7 +198,7 @@ assert_contains "URL IPv4 masked with path+query" 'vault_addr = "http://x.x.x.20
 
 cfg=$(make_cfg cfg6c.hcl 'vault_addr = "https://internal.vault.example.corp:8300"')
 out=$(run_sanitize "$cfg")
-assert_contains "long FQDN URL masked" 'vault_addr = "https://x.example.corp:8300"' "$out"
+assert_contains "long FQDN URL masked" 'vault_addr = "https://x.x.example.corp:8300"' "$out"
 
 # ---------- 7. localhost / loopback preserved ----------
 echo "=== 7. Loopback behavior ==="
@@ -312,6 +312,70 @@ out=$(bash "$VAULTX" sanitize -config="$cfg")
 assert_contains     "-config= flag redacts password"       'password = "***REDACTED***"'              "$out"
 assert_contains     "-config= flag masks vault_addr"       'vault_addr = "https://x.corp.io:8200"'    "$out"
 assert_not_contains "-config= no real password"            "p@ssw0rd"                                 "$out"
+
+# ---------- 13. DNS anonymization — extended coverage ----------
+echo "=== 13. DNS anonymization (multi-key and multi-level subdomains) ==="
+
+# 13a. URL with multi-level subdomain (api_addr)
+cfg=$(make_cfg cfg13a.hcl 'api_addr = "https://prd.ec2.hashicorp.com:8200"')
+out=$(run_sanitize "$cfg")
+assert_contains     "api_addr multi-level subdomain masked" \
+                    'api_addr = "https://x.x.hashicorp.com:8200"' "$out"
+assert_not_contains "api_addr real host gone" "prd.ec2.hashicorp.com" "$out"
+
+# 13b. URL with single subdomain (cluster_addr)
+cfg=$(make_cfg cfg13b.hcl 'cluster_addr = "https://vault.hashicorp.com:8201"')
+out=$(run_sanitize "$cfg")
+assert_contains     "cluster_addr single subdomain masked" \
+                    'cluster_addr = "https://x.hashicorp.com:8201"' "$out"
+assert_not_contains "cluster_addr real host gone" "vault.hashicorp.com" "$out"
+
+# 13c. Bare registrable domain (no subdomain) — should be unchanged
+cfg=$(make_cfg cfg13c.hcl 'api_addr = "https://hashicorp.com:8200"')
+out=$(run_sanitize "$cfg")
+assert_contains "bare registrable domain unchanged" \
+                'api_addr = "https://hashicorp.com:8200"' "$out"
+
+# 13d. host:port form (address key — listener)
+cfg=$(make_cfg cfg13d.hcl 'address = "prd.ec2.hashicorp.com:8200"')
+out=$(run_sanitize "$cfg")
+assert_contains     "host:port multi-level subdomain masked" \
+                    'address = "x.x.hashicorp.com:8200"' "$out"
+assert_not_contains "host:port real host gone" "prd.ec2.hashicorp.com" "$out"
+
+# 13e. IPv6 literal in address key — scheme/port preserved, IPv6 redacted (not domain-masked)
+cfg=$(make_cfg cfg13e.hcl 'cluster_addr = "https://[2001:db8::1]:8201"')
+out=$(run_sanitize "$cfg")
+assert_contains     "IPv6 address redacted"     '[REDACTED_IPv6]'   "$out"
+assert_contains     "IPv6 scheme preserved"     "https://"          "$out"
+assert_contains     "IPv6 port preserved"       ":8201"             "$out"
+assert_not_contains "IPv6 real address gone"    "2001:db8"          "$out"
+
+# 13f. redirect_addr
+cfg=$(make_cfg cfg13f.hcl 'redirect_addr = "https://node1.vault.example.com:8200"')
+out=$(run_sanitize "$cfg")
+assert_contains     "redirect_addr masked" \
+                    'redirect_addr = "https://x.x.example.com:8200"' "$out"
+
+# 13g. cluster_address (in listener stanza)
+cfg=$(make_cfg cfg13g.hcl 'cluster_address = "active.vault.example.com:8201"')
+out=$(run_sanitize "$cfg")
+assert_contains     "cluster_address host:port masked" \
+                    'cluster_address = "x.x.example.com:8201"' "$out"
+
+# 13h. 0.0.0.0 bind address in address/cluster_address keys — preserved unchanged
+cfg=$(make_cfg cfg13h.hcl 'address         = "0.0.0.0:8200"
+cluster_address = "0.0.0.0:8201"
+')
+out=$(run_sanitize "$cfg")
+assert_contains "0.0.0.0 address preserved"         'address         = "0.0.0.0:8200"'  "$out"
+assert_contains "0.0.0.0 cluster_address preserved" 'cluster_address = "0.0.0.0:8201"'  "$out"
+
+# 13i. vault_addr with multi-level subdomain (update existing behavior confirmation)
+cfg=$(make_cfg cfg13i.hcl 'vault_addr = "https://prd.ec2.hashicorp.com:8200/v1"')
+out=$(run_sanitize "$cfg")
+assert_contains "vault_addr multi-level multi-label masked" \
+                'vault_addr = "https://x.x.hashicorp.com:8200/v1"' "$out"
 
 # ---------- Summary ----------
 echo ""
