@@ -117,15 +117,22 @@ vaultx sanitize -config=config.hcl -out=sanitized.hcl
 | `access_key` |
 | `secret_key` |
 
-**Masked** — `vault_addr` is never fully redacted; the host is obscured while
-preserving enough information to validate correctness:
+**Masked** — address/URL keys are never fully redacted; DNS hostnames are
+anonymized by replacing each subdomain label with `x` while the registrable
+domain (last two labels) is preserved.  Structure (scheme, port, path) is kept.
+
+Keys that receive hostname masking (case-insensitive):
+`vault_addr`, `api_addr`, `cluster_addr`, `cluster_address`, `address`, `redirect_addr`
 
 | Input | Output |
 |-------|--------|
 | `169.182.4.100` | `x.x.x.100` |
+| `hashicorp.com` | `hashicorp.com` *(2-label — unchanged)* |
 | `vault.hashicorp.com` | `x.hashicorp.com` |
+| `prd.ec2.hashicorp.com` | `x.x.hashicorp.com` |
 | `https://vault.hashicorp.com:8200/v1` | `https://x.hashicorp.com:8200/v1` |
-| `localhost` / `127.0.0.1` | *(unchanged)* |
+| `prd.ec2.hashicorp.com:8201` | `x.x.hashicorp.com:8201` |
+| `localhost` / `127.0.0.1` / `0.0.0.0` | *(unchanged)* |
 | `[2001:db8::1]` | `[REDACTED_IPv6]` *(IPv6 loopback `::1` is preserved; all other IPv6 hosts are fully redacted)* |
 
 ### Before / After Example
@@ -134,6 +141,7 @@ Config before:
 
 ```hcl
 vault_addr   = "https://vault.hashicorp.com:8200"
+api_addr     = "https://prd.ec2.hashicorp.com:8200"
 token        = "s.abc123"
 kms_key_id   = "arn:aws:kms:us-east-1:123:key/abcd"
 cluster_name = "production"
@@ -150,6 +158,7 @@ Config after `vaultx sanitize`:
 
 ```hcl
 vault_addr   = "https://x.hashicorp.com:8200"
+api_addr     = "https://x.x.hashicorp.com:8200"
 token        = "***REDACTED***"
 kms_key_id   = "***REDACTED***"
 cluster_name = "production"
