@@ -200,7 +200,7 @@ async def _async_main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     config = AgentConfig.from_args(args)
 
-    if config.mcp_enabled and config.mcp_server_command and config.mcp_server_url:
+    if config.mcp_enabled and args.mcp_server_command and config.mcp_server_url:
         parser.error("Use either --mcp-server-command or --mcp-server-url, not both.")
 
     llm = OllamaClient(model=config.model, host=config.ollama_host)
