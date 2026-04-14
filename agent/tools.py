@@ -7,6 +7,8 @@ import subprocess
 import sys
 from typing import Any
 
+from .tool_registry import ToolDescriptor
+
 
 def _find_vaultx() -> str:
     """Return the path to the vaultx script.
@@ -139,3 +141,121 @@ def get_autopilot_config(diagnostics: dict[str, Any] | None = None) -> dict[str,
     """Return the autopilot_config section from diagnostics."""
     data = diagnostics if diagnostics is not None else collect_diagnostics()
     return data.get("autopilot_config", {})
+
+
+class DiagnosticsContext:
+    """Mutable holder for a cached diagnostics snapshot."""
+
+    def __init__(self, diagnostics: dict[str, Any] | None = None) -> None:
+        self.diagnostics = diagnostics
+
+    def get(self) -> dict[str, Any] | None:
+        """Return the cached snapshot."""
+        return self.diagnostics
+
+    def set(self, diagnostics: dict[str, Any] | None) -> None:
+        """Replace the cached snapshot."""
+        self.diagnostics = diagnostics
+
+    def refresh(self) -> dict[str, Any]:
+        """Collect a fresh diagnostics snapshot."""
+        self.diagnostics = collect_diagnostics()
+        return self.diagnostics
+
+    def ensure(self) -> dict[str, Any]:
+        """Return a snapshot, collecting one on demand if needed."""
+        if self.diagnostics is None:
+            self.refresh()
+        return self.diagnostics or {}
+
+
+def get_local_tool_descriptors(context: DiagnosticsContext) -> list[ToolDescriptor]:
+    """Return local diagnostics tools compatible with the unified registry."""
+    empty_parameters = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+
+    async def _collect(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return context.refresh()
+
+    async def _node_status(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return get_node_status(context.ensure())
+
+    async def _raft_peers(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return get_raft_peers(context.ensure())
+
+    async def _license(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return get_license_info(context.ensure())
+
+    async def _replication(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return get_replication_status(context.ensure())
+
+    async def _audit_devices(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return get_audit_devices(context.ensure())
+
+    async def _autopilot_state(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return get_autopilot_state(context.ensure())
+
+    async def _autopilot_config(_: dict[str, Any] | None = None) -> dict[str, Any]:
+        return get_autopilot_config(context.ensure())
+
+    return [
+        ToolDescriptor(
+            name="vaultx_collect_diagnostics",
+            description="Refresh the cached VaultX diagnostics snapshot from the local vaultx CLI.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_collect,
+        ),
+        ToolDescriptor(
+            name="vaultx_get_node_status",
+            description="Get the current node status section from the cached VaultX diagnostics snapshot.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_node_status,
+        ),
+        ToolDescriptor(
+            name="vaultx_get_raft_peers",
+            description="Get the current raft peers section from the cached VaultX diagnostics snapshot.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_raft_peers,
+        ),
+        ToolDescriptor(
+            name="vaultx_get_license_info",
+            description="Get the current license section from the cached VaultX diagnostics snapshot.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_license,
+        ),
+        ToolDescriptor(
+            name="vaultx_get_replication_status",
+            description="Get the current replication section from the cached VaultX diagnostics snapshot.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_replication,
+        ),
+        ToolDescriptor(
+            name="vaultx_get_audit_devices",
+            description="Get the current audit devices section from the cached VaultX diagnostics snapshot.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_audit_devices,
+        ),
+        ToolDescriptor(
+            name="vaultx_get_autopilot_state",
+            description="Get the current autopilot state section from the cached VaultX diagnostics snapshot.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_autopilot_state,
+        ),
+        ToolDescriptor(
+            name="vaultx_get_autopilot_config",
+            description="Get the current autopilot configuration section from the cached VaultX diagnostics snapshot.",
+            parameters=empty_parameters,
+            source="local",
+            invoke=_autopilot_config,
+        ),
+    ]
