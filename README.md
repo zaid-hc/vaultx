@@ -1,19 +1,19 @@
 # VaultX
 
-A powerful diagnostic tool for HashiCorp Vault clusters that collects comprehensive health and configuration information.
+VaultX is a diagnostic and reporting tool for HashiCorp Vault clusters. It helps operators quickly collect health, topology, configuration, and operational details for troubleshooting, validation, and environment review. In version 1.2, VaultX adds a sanitize option that redacts sensitive configuration data so reports and config samples are safer to share with teammates, support, and incident responders.
 
 ## Overview
 
-VaultX is a bash-based CLI tool designed to streamline Vault cluster diagnostics and troubleshooting. It gathers critical information about your Vault deployment including node status, Raft configuration, license details, replication status, and more - perfect for generating support tickets or debugging cluster issues.
+VaultX is a bash-based CLI tool designed to streamline Vault cluster diagnostics and troubleshooting. It gathers critical information about your Vault deployment including node status, Raft configuration, license details, replication status, and more - making it useful for debugging cluster issues, reviewing environment state, and preparing support data.
 
 ## Features
 
-- 🔍 **Comprehensive Diagnostics**: Collects all essential Vault cluster information in one command
-- 🎨 **Colorized Output**: Beautiful, easy-to-read CLI output with color-coded status indicators
-- 📊 **Pretty-Printed JSON**: Export diagnostic data in beautifully formatted JSON
+- 🔍 **Comprehensive Diagnostics**: Collects essential Vault cluster information in one command
+- 🎨 **Colorized Output**: Easy-to-read CLI output with color-coded status indicators
+- 📊 **Pretty-Printed JSON**: Export diagnostic data in formatted JSON
 - ⚡ **Parallel Data Collection**: Fast data gathering using parallel execution
-- 🔐 **Secure Authentication**: Supports VAULT_TOKEN environment variable or interactive token input
-- 🛡️ **Config Sanitization**: Strip sensitive values from config files before sharing with support
+- 🔐 **Secure Authentication**: Supports `VAULT_TOKEN` environment variable or interactive token input
+- 🛡️ **Config Sanitization**: Redact or mask sensitive values from Vault config files before sharing
 
 ## What VaultX Collects
 
@@ -83,8 +83,7 @@ vaultx -help
 
 ## Config Sanitization
 
-Use `vaultx sanitize` to redact or mask sensitive values from a Vault config file
-before sharing it with support teams.  No Vault connection or token is required.
+Use `vaultx sanitize` to redact or mask sensitive values from a Vault config file before sharing it with support teams or collaborators. No Vault connection or token is required for this subcommand.
 
 ### Basic Usage
 
@@ -101,8 +100,7 @@ vaultx sanitize -config=config.hcl -out=sanitized.hcl
 
 ### Sanitization Policy Matrix
 
-All config keys fall into one of four named categories.  Keys not explicitly
-listed are handled by the **generic fallback** (see below).
+All config keys fall into one of four named categories. Keys not explicitly listed are handled by the **generic fallback** (see below).
 
 | Category | Treatment | Named keys (case-insensitive) |
 |---|---|---|
@@ -111,17 +109,11 @@ listed are handled by the **generic fallback** (see below).
 | **path / tail-preserve** | Leading directories replaced with `...`; last two path segments kept | `path`, `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`, `tls_ca_file`, `ca_cert`, `ca_path`, `cert_file`, `key_file`, `pid_file`, `log_file`, `file_path`, `audit_log_path`, `config_file` |
 | **identifier / token-mask** | Leading delimiter-separated tokens replaced with `x`; suffix kept | `cluster_name`, `node_id`, `node_name`, `region`, `availability_zone` |
 
-> **Special case — `path` inside a `secret` stanza:** The sanitizer is
-> block-aware.  When a `path` key appears directly inside a `secret "…" { }`
-> stanza, its value is **fully redacted** (`***REDACTED***`) rather than
-> tail-preserved, because the Vault secret path is itself sensitive.
-> `path` in all other stanza types (e.g. `storage`, `seal`) retains the
-> normal tail-preserve behaviour.
+> **Special case — `path` inside a `secret` stanza:** The sanitizer is block-aware. When a `path` key appears directly inside a `secret "…" { }` stanza, its value is **fully redacted** (`***REDACTED***`) rather than tail-preserved, because the Vault secret path is itself sensitive. `path` in all other stanza types (e.g. `storage`, `seal`) retains the normal tail-preserve behaviour.
 
 #### Generic fallback (unrecognised keys)
 
-Custom stanza keys and env-style variable names that do not match any category
-above are classified by their **value content**, applied in priority order:
+Custom stanza keys and env-style variable names that do not match any category above are classified by their **value content**, applied in priority order:
 
 1. Key name contains `token`, `secret`, `password`, `passwd`, or `credential`, or ends with `_key` → `***REDACTED***`
 2. Value looks like a URL or IP address → endpoint/anonymize policy
@@ -239,7 +231,6 @@ seal "awskms" {
 
 
 https://github.com/user-attachments/assets/b7d5a6ec-b395-4be8-879e-c245506cec8b
-
 
 ## Authentication
 
@@ -462,7 +453,7 @@ The generated Markdown report includes:
 ### Agent Directory Structure
 
 ```
-agent/
+agenty/
 ├── __init__.py      # Package metadata
 ├── cli.py           # CLI entry point
 ├── llm.py           # Ollama LLM client wrapper
@@ -488,7 +479,12 @@ For issues, questions, or contributions, please visit the [GitHub repository](ht
 
 ## Changelog
 
-### v1.1.0 (Latest)
+### v1.2.0 (Latest)
+- ✅ Added `sanitize` subcommand for redacting sensitive Vault configuration values
+- ✅ Improved README documentation with sanitize usage and examples
+- ✅ Updated project description to reflect diagnostic and reporting workflows
+
+### v1.1.0
 - ✅ Added automatic JSON pretty-printing with `jq`
 - ✅ Updated CLI flags to use single dash convention
 - ✅ Improved error handling
@@ -502,4 +498,4 @@ For issues, questions, or contributions, please visit the [GitHub repository](ht
 
 ---
 
-**Note**: This tool is designed for diagnostic purposes only. Always review the data collected before sharing, as it may contain sensitive cluster information.
+**Note**: VaultX is designed for diagnostic purposes. Review collected or sanitized output before sharing it, even when using the sanitize option.
