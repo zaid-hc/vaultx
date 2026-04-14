@@ -24,22 +24,22 @@ class AgentConfig:
     output: str | None = None
     mcp_enabled: bool = False
     mcp_server_command: str = "vault-mcp-server"
+    mcp_server_command_explicit: bool = False
     mcp_server_url: str | None = None
     mcp_timeout: float = 30.0
 
     @classmethod
     def from_args(cls, args) -> "AgentConfig":
         """Build configuration from parsed CLI arguments and environment."""
+        env_command = os.environ.get("VAULTX_MCP_SERVER_COMMAND")
         return cls(
             generate_report=args.generate_report,
             model=args.model,
             ollama_host=args.ollama_host,
             output=args.output,
             mcp_enabled=args.mcp or _env_flag("VAULTX_MCP"),
-            mcp_server_command=args.mcp_server_command or os.environ.get(
-                "VAULTX_MCP_SERVER_COMMAND",
-                "vault-mcp-server",
-            ),
+            mcp_server_command=args.mcp_server_command or env_command or "vault-mcp-server",
+            mcp_server_command_explicit=args.mcp_server_command is not None or env_command is not None,
             mcp_server_url=args.mcp_server_url or os.environ.get("VAULTX_MCP_SERVER_URL"),
             mcp_timeout=float(args.mcp_timeout),
         )

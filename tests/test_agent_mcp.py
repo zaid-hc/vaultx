@@ -42,6 +42,7 @@ class AgentConfigTests(unittest.TestCase):
 
         self.assertTrue(config.mcp_enabled)
         self.assertEqual(config.mcp_server_command, "vault-mcp-server --stdio")
+        self.assertTrue(config.mcp_server_command_explicit)
         self.assertEqual(config.mcp_server_url, "http://127.0.0.1:8080/mcp")
         self.assertEqual(config.mcp_timeout, 45.0)
 
