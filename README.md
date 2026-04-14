@@ -111,6 +111,13 @@ listed are handled by the **generic fallback** (see below).
 | **path / tail-preserve** | Leading directories replaced with `...`; last two path segments kept | `path`, `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`, `tls_ca_file`, `ca_cert`, `ca_path`, `cert_file`, `key_file`, `pid_file`, `log_file`, `file_path`, `audit_log_path`, `config_file` |
 | **identifier / token-mask** | Leading delimiter-separated tokens replaced with `x`; suffix kept | `cluster_name`, `node_id`, `node_name`, `region`, `availability_zone` |
 
+> **Special case — `path` inside a `secret` stanza:** The sanitizer is
+> block-aware.  When a `path` key appears directly inside a `secret "…" { }`
+> stanza, its value is **fully redacted** (`***REDACTED***`) rather than
+> tail-preserved, because the Vault secret path is itself sensitive.
+> `path` in all other stanza types (e.g. `storage`, `seal`) retains the
+> normal tail-preserve behaviour.
+
 #### Generic fallback (unrecognised keys)
 
 Custom stanza keys and env-style variable names that do not match any category

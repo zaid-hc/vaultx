@@ -620,6 +620,81 @@ assert_contains "telemetry: max_gauge_keys unchanged"    'max_gauge_keys   = 500
 # Confirm no special per-field telemetry-only magic was introduced
 assert_not_contains "telemetry: no TELEMETRY_REDACTED marker" "TELEMETRY_REDACTED" "$out"
 
+# ---------- 19. Block-aware sanitization: secret stanza path ----------
+echo "=== 19. Block-aware sanitization: secret stanza path ==="
+
+# 19a. 'path' inside a 'secret' stanza must be fully redacted (2-segment value
+#      that would normally pass through unchanged under the tail-preserve policy,
+#      since tail-preserve only replaces segments for paths with more than 2
+#      segments — full redaction overrides that behaviour inside secret stanzas).
+cfg=$(make_cfg cfg19a.hcl 'secret "test" {
+  path = "secret/test"
+  data {
+    value  = "test string"
+    value2 = 1000
+  }
+}
+')
+out=$(run_sanitize "$cfg")
+assert_contains     "secret stanza path fully redacted"    'path = "***REDACTED***"'  "$out"
+assert_not_contains "secret stanza real path gone"         "secret/test"               "$out"
+
+# 19b. Other keys inside a 'secret' stanza still sanitize correctly (data values).
+assert_contains     "secret stanza non-sensitive pass-through"  'value2 = 1000'  "$out"
+
+# 19c. Sensitive data value inside the secret stanza's 'data' block is redacted.
+cfg=$(make_cfg cfg19c.hcl 'secret "my-app" {
+  path = "kv/my-app"
+  data {
+    password = "hunter2"
+  }
+}
+')
+out=$(run_sanitize "$cfg")
+assert_contains     "secret stanza nested password redacted"  'password = "***REDACTED***"'  "$out"
+assert_not_contains "secret stanza nested password gone"       "hunter2"                       "$out"
+assert_contains     "secret stanza nested path redacted"      'path = "***REDACTED***"'       "$out"
+
+# 19d. 'path' outside a 'secret' stanza retains the existing tail-preserve policy.
+#      A 3-segment path has its leading segment replaced with '...'.
+cfg=$(make_cfg cfg19d.hcl 'storage "file" {
+  path = "/opt/vault/data"
+}
+')
+out=$(run_sanitize "$cfg")
+assert_contains     "non-secret path tail-preserved"   'path = ".../vault/data"'  "$out"
+assert_not_contains "non-secret real path gone"         "/opt/vault/data"           "$out"
+
+# 19e. 'path' outside any stanza (top-level) also retains tail-preserve policy.
+cfg=$(make_cfg cfg19e.hcl 'path = "/opt/vault/data"')
+out=$(run_sanitize "$cfg")
+assert_contains     "top-level path tail-preserved"  'path = ".../vault/data"'  "$out"
+
+# 19f. A 'secret' stanza followed by a non-secret stanza — the non-secret
+#      stanza's 'path' must NOT be redacted (stanza context resets correctly).
+cfg=$(make_cfg cfg19f.hcl 'secret "creds" {
+  path = "secret/creds"
+}
+
+storage "file" {
+  path = "/opt/vault/data"
+}
+')
+out=$(run_sanitize "$cfg")
+assert_contains     "secret stanza path redacted in block"    'path = "***REDACTED***"'   "$out"
+assert_contains     "post-secret storage path tail-preserved" 'path = ".../vault/data"'   "$out"
+assert_not_contains "post-secret real storage path gone"       "/opt/vault/data"            "$out"
+
+# 19g. Multi-segment (>2) path inside a 'secret' stanza is still fully redacted
+#      (not partially masked).
+cfg=$(make_cfg cfg19g.hcl 'secret "deep" {
+  path = "kv/team/app/config"
+}
+')
+out=$(run_sanitize "$cfg")
+assert_contains     "secret stanza deep path fully redacted"   'path = "***REDACTED***"'      "$out"
+assert_not_contains "secret stanza deep path not tail-masked"  ".../app/config"                "$out"
+
 # ---------- Summary ----------
 echo ""
 echo "=================================="
