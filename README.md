@@ -83,8 +83,8 @@ vaultx -help
 
 ## Config Sanitization
 
-Use `vaultx sanitize` to redact sensitive values from a Vault config file before
-sharing it with support teams.  No Vault connection or token is required.
+Use `vaultx sanitize` to redact or mask sensitive values from a Vault config file
+before sharing it with support teams.  No Vault connection or token is required.
 
 ### Basic Usage
 
@@ -99,34 +99,36 @@ vaultx sanitize config.hcl
 vaultx sanitize -config=config.hcl -out=sanitized.hcl
 ```
 
-### What Gets Redacted vs Masked
+### Sanitization Policy Matrix
 
-**Fully redacted** (replaced with `***REDACTED***`) — keys matched case-insensitively:
+All config keys fall into one of four named categories.  Keys not explicitly
+listed are handled by the **generic fallback** (see below).
 
-| Key |
-|-----|
-| `token` |
-| `auth_token` |
-| `api_key` |
-| `secret` |
-| `client_secret` |
-| `kms_key` |
-| `kms_key_id` |
-| `private_key` |
-| `password` |
-| `access_key` |
-| `secret_key` |
+| Category | Treatment | Named keys (case-insensitive) |
+|---|---|---|
+| **secret / full-redact** | Replaced with `***REDACTED***` | `token`, `auth_token`, `api_key`, `secret`, `client_secret`, `kms_key`, `kms_key_id`, `private_key`, `password`, `access_key`, `secret_key` |
+| **endpoint / anonymize** | Host anonymized; scheme, port, path preserved | `vault_addr`, `api_addr`, `cluster_addr`, `cluster_address`, `address`, `redirect_addr` |
+| **path / tail-preserve** | Leading directories replaced with `...`; last two path segments kept | `path`, `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`, `tls_ca_file`, `ca_cert`, `ca_path`, `cert_file`, `key_file`, `pid_file`, `log_file`, `file_path`, `audit_log_path`, `config_file` |
+| **identifier / token-mask** | Leading delimiter-separated tokens replaced with `x`; suffix kept | `cluster_name`, `node_id`, `node_name`, `region`, `availability_zone` |
 
-**Masked** — address/URL keys are never fully redacted; DNS hostnames are
-anonymized by replacing each subdomain label with `x` while the registrable
-domain (last two labels) is preserved.  Structure (scheme, port, path) is kept.
+#### Generic fallback (unrecognised keys)
 
-Keys that receive hostname masking (case-insensitive):
-`vault_addr`, `api_addr`, `cluster_addr`, `cluster_address`, `address`, `redirect_addr`
+Custom stanza keys and env-style variable names that do not match any category
+above are classified by their **value content**, applied in priority order:
+
+1. Key name contains `token`, `secret`, `password`, `passwd`, or `credential`, or ends with `_key` → `***REDACTED***`
+2. Value looks like a URL or IP address → endpoint/anonymize policy
+3. Value is an absolute path → path/tail-preserve policy
+4. Value is a 3-or-more-token hyphen/underscore identifier → identifier/token-mask policy
+5. Otherwise → passed through unchanged
+
+### endpoint / anonymize — Examples
+
+Keys: `vault_addr`, `api_addr`, `cluster_addr`, `cluster_address`, `address`, `redirect_addr`
 
 | Input | Output |
 |-------|--------|
-| `169.182.4.100` | `x.x.x.100` |
+| `169.182.4.100` | `x.x.x.100` *(last octet preserved)* |
 | `hashicorp.com` | `hashicorp.com` *(2-label — unchanged)* |
 | `vault.hashicorp.com` | `x.hashicorp.com` |
 | `prd.ec2.hashicorp.com` | `x.x.hashicorp.com` |
@@ -136,16 +138,48 @@ Keys that receive hostname masking (case-insensitive):
 | `[2001:db8::1]` | `[x:x::1]` *(last hextet preserved; prior hextets replaced with `x`; loopback `[::1]` and wildcard `[::]` unchanged)* |
 | `[fd00:abcd::10]` | `[x:x::10]` |
 
+### path / tail-preserve — Examples
+
+Keys: `path`, `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`, `tls_ca_file`, `ca_cert`, `ca_path`, `cert_file`, `key_file`, `pid_file`, `log_file`, `file_path`, `audit_log_path`, `config_file`
+
+Each leading directory segment is replaced with `...`; the last two segments are kept.
+Paths with two or fewer segments are passed through unchanged.
+
+| Input | Output |
+|-------|--------|
+| `/etc/ssl/vault/server.key` | `.../.../vault/server.key` |
+| `/opt/vault/tls/tls.crt` | `.../.../tls/tls.crt` |
+| `/opt/vault/data` | `.../vault/data` |
+| `/vault/data` | `/vault/data` *(≤ 2 segments — unchanged)* |
+| `C:\vault\tls\server.key` | `...\tls\server.key` *(Windows paths also supported)* |
+
+### identifier / token-mask — Examples
+
+Keys: `cluster_name`, `node_id`, `node_name`, `region`, `availability_zone`
+
+Uses the first delimiter found (`-` takes priority over `_`).
+Rule: keep the last half (rounded up) of tokens, replace the first half (rounded down) with `x`.
+Single-token values (no delimiter) are passed through unchanged.
+
+| Input | Output |
+|-------|--------|
+| `vault-prod-eu-west-1` | `x-x-eu-west-1` *(N=5, mask 2, keep 3)* |
+| `us-east-1` | `x-east-1` *(N=3, mask 1, keep 2)* |
+| `prod-cluster-01` | `x-cluster-01` *(N=3, mask 1, keep 2)* |
+| `my_app_prod_us_east` | `x_x_prod_us_east` *(N=5, underscore delimiter, mask 2)* |
+| `production` | `production` *(single token — unchanged)* |
+
 ### Before / After Example
 
 Config before:
 
 ```hcl
-vault_addr   = "https://vault.hashicorp.com:8200"
-api_addr     = "https://prd.ec2.hashicorp.com:8200"
-token        = "s.abc123"
-kms_key_id   = "arn:aws:kms:us-east-1:123:key/abcd"
-cluster_name = "production"
+vault_addr     = "https://vault.hashicorp.com:8200"
+api_addr       = "https://prd.ec2.hashicorp.com:8200"
+cluster_name   = "vault-prod-eu-west-1"
+token          = "s.abc123"
+tls_cert_file  = "/etc/ssl/vault/tls.crt"
+tls_key_file   = "/etc/ssl/vault/server.key"
 
 seal "awskms" {
   region     = "us-east-1"
@@ -158,21 +192,25 @@ seal "awskms" {
 Config after `vaultx sanitize`:
 
 ```hcl
-vault_addr   = "https://x.hashicorp.com:8200"
-api_addr     = "https://x.x.hashicorp.com:8200"
-token        = "***REDACTED***"
-kms_key_id   = "***REDACTED***"
-cluster_name = "production"
+vault_addr     = "https://x.hashicorp.com:8200"
+api_addr       = "https://x.x.hashicorp.com:8200"
+cluster_name   = "x-x-eu-west-1"
+token          = "***REDACTED***"
+tls_cert_file  = ".../.../vault/tls.crt"
+tls_key_file   = ".../.../vault/server.key"
 
 seal "awskms" {
-  region     = "us-east-1"
+  region     = "x-east-1"
   kms_key_id = "***REDACTED***"
   access_key = "***REDACTED***"
   secret_key = "***REDACTED***"
 }
 ```
 
-> **Note:** Log sanitization is planned for a future release.
+> **Note:** Telemetry-specific bespoke masking rules are deferred to a future release.
+> Custom telemetry keys are handled by the generic fallback today.
+>
+> Log sanitization is also planned for a future release.
 
 ## Command-Line Options
 
