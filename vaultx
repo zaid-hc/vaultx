@@ -445,10 +445,13 @@ mask_identifier_value() {
   echo "$result"
 }
 
-# sanitize_line <line>
+# sanitize_line <line> [in_secret]
 # Processes one line of a config file: redacts sensitive keys, masks vault_addr.
+# in_secret=1 when the line is inside a 'secret' stanza; causes 'path' to be
+# fully redacted instead of tail-preserved.
 sanitize_line() {
   local line="$1"
+  local in_secret="${2:-0}"
 
   # Pass through comment lines unchanged
   if [[ "$line" =~ ^[[:space:]]*# ]]; then
@@ -499,8 +502,23 @@ sanitize_line() {
       return 0
     fi
 
-    # Path keys: tail-preserving masking (keep last two path segments)
+    # Path keys: tail-preserving masking (keep last two path segments).
+    # Special case: 'path' inside a 'secret' stanza is fully redacted because
+    # the Vault secret path is itself sensitive information.
     if [[ "$key_lower" =~ $SANITIZE_PATH_PATTERN ]]; then
+      if [[ "$key_lower" == "path" && "$in_secret" == "1" ]]; then
+        local suffix=""
+        if [[ "$val" =~ ^\"[^\"]*\"(.*)$ ]]; then
+          suffix="${BASH_REMATCH[1]}"
+          echo "${indent}${key}${sp1}=${sp2}\"***REDACTED***\"${suffix}"
+        elif [[ "$val" =~ ^\'[^\']*\'(.*)$ ]]; then
+          suffix="${BASH_REMATCH[1]}"
+          echo "${indent}${key}${sp1}=${sp2}'***REDACTED***'${suffix}"
+        else
+          echo "${indent}${key}${sp1}=${sp2}\"***REDACTED***\""
+        fi
+        return 0
+      fi
       local raw masked suffix
       if [[ "$val" =~ ^\"([^\"]*)\"(.*)$ ]]; then
         raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
@@ -624,10 +642,55 @@ sanitize_line() {
 
 # sanitize_config <file>
 # Reads a config file line by line and sanitizes each line.
+# Tracks block/stanza context so that 'path' inside a 'secret' stanza is
+# fully redacted rather than tail-preserved.
 sanitize_config() {
   local file="$1"
+
+  # Context tracking for secret stanzas.
+  # _in_secret  : 1 while processing lines inside a 'secret "..." { }' block.
+  # _secret_depth: brace nesting depth relative to the opening '{' of the stanza.
+  # _pending_secret: 1 after seeing 'secret "..."' on a line with no '{' yet
+  #                  (handles the rare case where the opening brace is on the next line).
+  local _in_secret=0
+  local _secret_depth=0
+  local _pending_secret=0
+
   while IFS= read -r line || [[ -n "$line" ]]; do
-    sanitize_line "$line"
+    # Count unquoted-ish braces on this line (good enough for standard HCL config).
+    local _opens _closes
+    _opens=$(printf '%s' "$line" | tr -cd '{' | wc -c)
+    _closes=$(printf '%s' "$line" | tr -cd '}' | wc -c)
+
+    if [[ $_in_secret -eq 0 && $_pending_secret -eq 0 ]]; then
+      # Look for the start of a 'secret "<name>"' stanza.
+      # Pattern: optional leading whitespace, then the word 'secret' followed by whitespace.
+      if [[ "$line" =~ ^[[:space:]]*secret[[:space:]]+ ]]; then
+        if [[ $_opens -gt 0 ]]; then
+          # Opening brace is on this line.
+          _in_secret=1
+          _secret_depth=$(( _opens - _closes ))
+          [[ $_secret_depth -le 0 ]] && _in_secret=0 && _secret_depth=0
+        else
+          # No opening brace yet — wait for it on the next line.
+          _pending_secret=1
+        fi
+      fi
+    elif [[ $_pending_secret -eq 1 ]]; then
+      # Waiting for the opening brace of the secret stanza.
+      if [[ $_opens -gt 0 ]]; then
+        _pending_secret=0
+        _in_secret=1
+        _secret_depth=$(( _opens - _closes ))
+        [[ $_secret_depth -le 0 ]] && _in_secret=0 && _secret_depth=0
+      fi
+    else
+      # Already inside a secret stanza — update the brace depth.
+      _secret_depth=$(( _secret_depth + _opens - _closes ))
+      [[ $_secret_depth -le 0 ]] && _in_secret=0 && _secret_depth=0
+    fi
+
+    sanitize_line "$line" "$_in_secret"
   done < "$file"
 }
 
