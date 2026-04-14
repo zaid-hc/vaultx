@@ -1,6 +1,9 @@
 """Ollama LLM client wrapper for the VaultX agent."""
 
+import json
 import sys
+from dataclasses import dataclass
+from typing import Any
 
 
 def _import_ollama():
@@ -72,11 +75,79 @@ class OllamaClient:
         if stream:
             return self._stream_chat(messages)
         response = self._client.chat(model=self.model, messages=messages)
-        return response.message.content
+        return _get_message_content(response) or ""
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        stream: bool = False,
+    ) -> tuple[str | None, list["ToolCall"]]:
+        """Send a tool-enabled chat request to Ollama."""
+        response = self._client.chat(
+            model=self.model,
+            messages=messages,
+            tools=tools,
+            stream=stream,
+        )
+        if stream:
+            content_parts: list[str] = []
+            tool_calls: list[ToolCall] = []
+            for chunk in response:
+                chunk_content = _get_message_content(chunk)
+                if chunk_content:
+                    content_parts.append(chunk_content)
+                tool_calls.extend(_extract_tool_calls(chunk))
+            return ("".join(content_parts) or None, tool_calls)
+        return (_get_message_content(response), _extract_tool_calls(response))
 
     def _stream_chat(self, messages: list[dict]):
         """Yield text chunks from a streaming chat response."""
         for chunk in self._client.chat(model=self.model, messages=messages, stream=True):
-            content = chunk.message.content
+            content = _get_message_content(chunk)
             if content:
                 yield content
+
+
+@dataclass(slots=True)
+class ToolCall:
+    """Structured representation of an LLM-requested tool call."""
+
+    name: str
+    arguments: dict[str, Any]
+
+
+def _get_message(response: Any) -> Any:
+    if isinstance(response, dict):
+        return response.get("message", {})
+    return getattr(response, "message", {})
+
+
+def _get_message_content(response: Any) -> str | None:
+    message = _get_message(response)
+    if isinstance(message, dict):
+        return message.get("content")
+    return getattr(message, "content", None)
+
+
+def _extract_tool_calls(response: Any) -> list[ToolCall]:
+    message = _get_message(response)
+    raw_tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else getattr(message, "tool_calls", [])
+    parsed_calls: list[ToolCall] = []
+    for raw_call in raw_tool_calls or []:
+        function = raw_call.get("function", {}) if isinstance(raw_call, dict) else getattr(raw_call, "function", None)
+        if function is None:
+            continue
+        name = function.get("name") if isinstance(function, dict) else getattr(function, "name", None)
+        arguments = (
+            function.get("arguments", {})
+            if isinstance(function, dict)
+            else getattr(function, "arguments", {})
+        )
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        parsed_calls.append(ToolCall(name=name or "", arguments=arguments or {}))
+    return [call for call in parsed_calls if call.name]

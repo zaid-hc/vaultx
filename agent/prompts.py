@@ -30,6 +30,18 @@ You have access to diagnostic data collected by the vaultx tool. Use this data t
 If diagnostic data is not yet collected, indicate that you need to run diagnostics first.
 """
 
+MCP_TOOL_GUIDANCE = """You have access to two categories of tools:
+- Local diagnostics tools (`vaultx_*` prefix): pre-collected snapshots of node status, raft peers, license, replication, audit devices, and autopilot. Use these for quick cluster health questions that do not require live Vault API access.
+- MCP Vault tools (all other tool names): live Vault API operations via vault-mcp-server. Use these when you need to read or write actual Vault data, manage secrets, configure auth methods, or perform operations not captured in the pre-collected snapshot.
+
+When both sources could answer a question, prefer local diagnostics because they are faster and preserve the existing vaultx-based diagnostics flow. Use MCP tools when the user explicitly asks for live data or when the local snapshot does not contain the required information.
+"""
+
+SYSTEM_PROMPT_WITH_MCP = """{base_prompt}
+
+{mcp_guidance}
+""".format(base_prompt=SYSTEM_PROMPT.rstrip(), mcp_guidance=MCP_TOOL_GUIDANCE)
+
 REPORT_PROMPT_TEMPLATE = """You are VaultX Assistant, an expert HashiCorp Vault cluster diagnostics specialist.
 
 Analyze the following Vault cluster diagnostic data and generate a comprehensive support ticket report in Markdown format.
@@ -90,8 +102,16 @@ INTERACTIVE_CONTEXT_TEMPLATE = """Current diagnostic data from the Vault cluster
 {diagnostics_json}
 ```
 
+{mcp_tools_available}
+
 The user is asking: {user_question}
 
 Answer based on the diagnostic data above. Be specific and reference actual values from the data.
 If something cannot be determined from the available data, say so clearly.
+"""
+
+TOOL_CALL_RESULT_TEMPLATE = """Tool `{tool_name}` returned:
+```json
+{result_json}
+```
 """

@@ -360,6 +360,7 @@ The **VaultX AI Agent** adds a Python-based conversational layer on top of the e
 ```
 User ↔ vaultx-agent (Python CLI) ↔ LLM (Ollama/local)
                                   ↔ vaultx (bash tool) ↔ Vault API
+                                  ↔ vault-mcp-server   ↔ Vault API  [optional]
 ```
 
 ### Prerequisites
@@ -368,6 +369,7 @@ User ↔ vaultx-agent (Python CLI) ↔ LLM (Ollama/local)
 - **Ollama** installed and running (`ollama serve`)
 - The default model pulled: `ollama pull llama3.1:8b`
 - The same `VAULT_ADDR` / `VAULT_TOKEN` environment variables used by the bash tool
+- Optional for live MCP-backed Vault operations: **vault-mcp-server** (for example `uvx --from hashicorp/vault-mcp-server vault-mcp-server`)
 
 ### Installation
 
@@ -429,12 +431,44 @@ Save the report to a file:
 | `--model MODEL` | `llama3.1:8b` | Ollama model to use |
 | `--ollama-host HOST` | `http://localhost:11434` | Ollama server URL |
 | `--output FILE`, `-o FILE` | stdout | Save report to FILE (used with `--generate-report`) |
+| `--mcp` | disabled | Enable MCP support and connect to `vault-mcp-server` |
+| `--mcp-server-command CMD` | `vault-mcp-server` | Launch an MCP server over stdio |
+| `--mcp-server-url URL` | — | Connect to an existing Streamable HTTP or SSE MCP endpoint |
+| `--mcp-timeout SECS` | `30` | Timeout for MCP tool discovery and calls |
 | `--help` | — | Show help message |
 
 You can also run the agent as a Python module:
 
 ```bash
 python -m agent.cli --help
+```
+
+#### MCP Integration
+
+`vaultx-agent` keeps the existing local `vaultx` snapshot flow and adds optional live Vault tools via MCP.
+
+- Local `vaultx_*` tools continue to answer snapshot-based diagnostics questions quickly.
+- MCP tools are only enabled when `--mcp` is set or `VAULTX_MCP=true` is exported.
+- When both are available, the agent prefers the local snapshot first and only calls MCP tools for live Vault operations or questions that are not covered by the cached diagnostics data.
+
+Start a local MCP server over stdio:
+
+```bash
+./vaultx-agent --mcp --mcp-server-command "uvx --from hashicorp/vault-mcp-server vault-mcp-server"
+```
+
+Connect to a running MCP endpoint instead:
+
+```bash
+./vaultx-agent --mcp --mcp-server-url http://127.0.0.1:8000/mcp
+```
+
+Environment variable fallbacks are also supported:
+
+```bash
+export VAULTX_MCP=true
+export VAULTX_MCP_SERVER_COMMAND="uvx --from hashicorp/vault-mcp-server vault-mcp-server"
+./vaultx-agent
 ```
 
 ### Report Structure
@@ -453,11 +487,14 @@ The generated Markdown report includes:
 ### Agent Directory Structure
 
 ```
-agenty/
+agent/
 ├── __init__.py      # Package metadata
 ├── cli.py           # CLI entry point
+├── config.py        # Shared runtime configuration
 ├── llm.py           # Ollama LLM client wrapper
+├── mcp_client.py    # MCP connection lifecycle and tool calls
 ├── tools.py         # Tool definitions wrapping vaultx -format=json
+├── tool_registry.py # Unified local + MCP tool registry
 ├── prompts.py       # System prompts and templates
 ├── report.py        # Report generation logic
 └── requirements.txt # Python dependencies
