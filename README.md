@@ -132,8 +132,9 @@ Keys that receive hostname masking (case-insensitive):
 | `prd.ec2.hashicorp.com` | `x.x.hashicorp.com` |
 | `https://vault.hashicorp.com:8200/v1` | `https://x.hashicorp.com:8200/v1` |
 | `prd.ec2.hashicorp.com:8201` | `x.x.hashicorp.com:8201` |
-| `localhost` / `127.0.0.1` / `0.0.0.0` | *(unchanged)* |
-| `[2001:db8::1]` | `[REDACTED_IPv6]` *(IPv6 loopback `::1` is preserved; all other IPv6 hosts are fully redacted)* |
+| `localhost` / `127.0.0.1` / `0.0.0.0` / `[::]` | *(unchanged)* |
+| `[2001:db8::1]` | `[x:x::1]` *(last hextet preserved; prior hextets replaced with `x`; loopback `[::1]` and wildcard `[::]` unchanged)* |
+| `[fd00:abcd::10]` | `[x:x::10]` |
 
 ### Before / After Example
 
