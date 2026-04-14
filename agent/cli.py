@@ -201,7 +201,7 @@ async def _async_main(argv: list[str] | None = None) -> None:
     config = AgentConfig.from_args(args)
 
     if config.mcp_enabled and config.mcp_server_command_explicit and config.mcp_server_url:
-        parser.error("Use either --mcp-server-command or --mcp-server-url, not both.")
+        raise SystemExit("vaultx-agent: error: Use either --mcp-server-command or --mcp-server-url, not both.")
 
     llm = OllamaClient(model=config.model, host=config.ollama_host)
     llm.check_availability()

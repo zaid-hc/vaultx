@@ -170,10 +170,14 @@ def _build_mcp_child_env() -> dict[str, str]:
         "AWS_REGION",
         "AWS_DEFAULT_REGION",
     }
+
+    def _should_passthrough(name: str) -> bool:
+        return name in passthrough_names or name.startswith(passthrough_prefixes)
+
     return {
         key: value
         for key, value in os.environ.items()
-        if key in passthrough_names or any(key.startswith(prefix) for prefix in passthrough_prefixes)
+        if _should_passthrough(key)
     }
 
 

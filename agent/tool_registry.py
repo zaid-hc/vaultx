@@ -26,13 +26,12 @@ class ToolRegistry:
         local_tools: Iterable[ToolDescriptor] | None = None,
         mcp_tools: Iterable[ToolDescriptor] | None = None,
     ) -> None:
-        tools = [
-            *(local_tools or []),
-            *(mcp_tools or []),
-        ]
+        tools = [*(local_tools or []), *(mcp_tools or [])]
+        names = [tool.name for tool in tools]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"Duplicate tool names found: {', '.join(duplicates)}")
         self._tools = {tool.name: tool for tool in tools}
-        if len(self._tools) != len(tools):
-            raise ValueError("Tool names must be unique across local and MCP tools.")
 
     @classmethod
     async def create(
