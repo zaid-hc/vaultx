@@ -70,7 +70,7 @@ class MCPClient:
             parameters = (
                 getattr(tool, "inputSchema", None)
                 or getattr(tool, "input_schema", None)
-                or {"type": "object", "properties": {}, "additionalProperties": True}
+                or {"type": "object", "properties": {}, "additionalProperties": False}
             )
 
             async def _invoke(
