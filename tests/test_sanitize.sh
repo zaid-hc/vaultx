@@ -149,9 +149,10 @@ assert_contains "nested secret_key redacted"  'secret_key = "***REDACTED***"'  "
 assert_contains "nested access_key redacted"  'access_key = "***REDACTED***"'  "$out"
 assert_contains "nested kms_key_id redacted"  'kms_key_id = "***REDACTED***"'  "$out"
 assert_contains "nested token redacted"       'token         = "***REDACTED***"' "$out"
-assert_contains "non-sensitive path preserved" 'path = "/opt/vault/data"'       "$out"
+assert_contains "storage path tail-masked"    'path = ".../vault/data"'         "$out"
 assert_contains "non-sensitive address preserved" 'address       = "0.0.0.0:8200"' "$out"
 assert_not_contains "no real kms key" "arn:aws:kms" "$out"
+assert_not_contains "original path not present" "/opt/vault/data"               "$out"
 
 # ---------- 4. vault_addr plain IPv4 masking ----------
 echo "=== 4. vault_addr IPv4 masking ==="
@@ -406,6 +407,218 @@ cfg=$(make_cfg cfg13i.hcl 'vault_addr = "https://prd.ec2.hashicorp.com:8200/v1"'
 out=$(run_sanitize "$cfg")
 assert_contains "vault_addr multi-level multi-label masked" \
                 'vault_addr = "https://x.x.hashicorp.com:8200/v1"' "$out"
+
+# ---------- 14. Path masking — tail-preserving ----------
+echo "=== 14. Path masking (tail-preserving) ==="
+
+# 14a. Deep Unix path — 4 segments: keep last 2
+cfg=$(make_cfg cfg14a.hcl 'tls_cert_file = "/opt/vault/tls/tls.crt"')
+out=$(run_sanitize "$cfg")
+assert_contains     "deep Unix path last 2 kept"  'tls_cert_file = ".../.../tls/tls.crt"'  "$out"
+assert_not_contains "deep Unix real path gone"     "/opt/vault/tls/tls.crt"                 "$out"
+
+# 14b. Deep Unix path — 5 segments: keep last 2 (3 masked)
+cfg=$(make_cfg cfg14b.hcl 'tls_key_file = "/etc/ssl/private/vault/server.key"')
+out=$(run_sanitize "$cfg")
+assert_contains     "5-segment path last 2 kept"  'tls_key_file = ".../.../.../vault/server.key"' "$out"
+assert_not_contains "5-segment real path gone"     "/etc/ssl/private/vault/server.key"             "$out"
+
+# 14c. 3-segment Unix path — keep last 2, mask 1
+cfg=$(make_cfg cfg14c.hcl 'pid_file = "/opt/vault/vault.pid"')
+out=$(run_sanitize "$cfg")
+assert_contains     "3-segment path last 2 kept"  'pid_file = ".../vault/vault.pid"'  "$out"
+assert_not_contains "3-segment real path gone"     "/opt/vault/vault.pid"              "$out"
+
+# 14d. 2-segment Unix path — no masking (not enough segments)
+cfg=$(make_cfg cfg14d.hcl 'log_file = "/vault/vault.log"')
+out=$(run_sanitize "$cfg")
+assert_contains "2-segment path unchanged" 'log_file = "/vault/vault.log"' "$out"
+
+# 14e. Single-segment path — unchanged
+cfg=$(make_cfg cfg14e.hcl 'log_file = "/vault.log"')
+out=$(run_sanitize "$cfg")
+assert_contains "1-segment path unchanged" 'log_file = "/vault.log"' "$out"
+
+# 14f. storage path key
+cfg=$(make_cfg cfg14f.hcl 'path = "/opt/vault/data"')
+out=$(run_sanitize "$cfg")
+assert_contains     "storage path masked"   'path = ".../vault/data"' "$out"
+assert_not_contains "storage real path gone" "/opt/vault/data"         "$out"
+
+# 14g. ca_cert path
+cfg=$(make_cfg cfg14g.hcl 'ca_cert = "/etc/ssl/certs/vault-ca.pem"')
+out=$(run_sanitize "$cfg")
+assert_contains     "ca_cert path masked"   'ca_cert = ".../.../certs/vault-ca.pem"' "$out"
+assert_not_contains "ca_cert real path gone" "/etc/ssl/certs/vault-ca.pem"            "$out"
+
+# 14h. Windows-style path (backslash delimiter)
+cfg=$(make_cfg cfg14h.hcl 'tls_cert_file = "C:\vault\tls\server.crt"')
+out=$(run_sanitize "$cfg")
+assert_contains     "Windows path last 2 kept"  'tls_cert_file = "...\tls\server.crt"'  "$out"
+assert_not_contains "Windows real path gone"     "C:\vault\tls"                           "$out"
+
+# ---------- 15. Resource identifier masking ----------
+echo "=== 15. Resource identifier masking ==="
+
+# 15a. Required example: vault-prod-eu-west-1 → x-x-eu-west-1
+cfg=$(make_cfg cfg15a.hcl 'cluster_name = "vault-prod-eu-west-1"')
+out=$(run_sanitize "$cfg")
+assert_contains     "5-token ident masked"     'cluster_name = "x-x-eu-west-1"'   "$out"
+assert_not_contains "5-token real value gone"  "vault-prod-eu-west-1"              "$out"
+
+# 15b. 3-token hyphen-delimited: keep last 2, mask 1
+cfg=$(make_cfg cfg15b.hcl 'cluster_name = "prod-cluster-01"')
+out=$(run_sanitize "$cfg")
+assert_contains "3-token ident masked" 'cluster_name = "x-cluster-01"' "$out"
+
+# 15c. Single-token value: returned unchanged
+cfg=$(make_cfg cfg15c.hcl 'cluster_name = "production"')
+out=$(run_sanitize "$cfg")
+assert_contains "single-token ident unchanged" 'cluster_name = "production"' "$out"
+
+# 15d. region key with AWS-style region value
+cfg=$(make_cfg cfg15d.hcl 'region = "us-east-1"')
+out=$(run_sanitize "$cfg")
+assert_contains     "region value masked"     'region = "x-east-1"'  "$out"
+assert_not_contains "region real value gone"  "us-east-1"             "$out"
+
+# 15e. node_id with underscore delimiter
+cfg=$(make_cfg cfg15e.hcl 'node_id = "vault_prod_eu_west_1"')
+out=$(run_sanitize "$cfg")
+assert_contains     "underscore ident masked"    'node_id = "x_x_eu_west_1"'   "$out"
+assert_not_contains "underscore real value gone" "vault_prod_eu_west_1"          "$out"
+
+# 15f. 2-token value: mask first, keep last
+cfg=$(make_cfg cfg15f.hcl 'cluster_name = "prod-vault"')
+out=$(run_sanitize "$cfg")
+assert_contains "2-token ident masked" 'cluster_name = "x-vault"' "$out"
+
+# 15g. node_name with 4 tokens
+cfg=$(make_cfg cfg15g.hcl 'node_name = "vault-prod-node-01"')
+out=$(run_sanitize "$cfg")
+assert_contains "4-token ident masked" 'node_name = "x-x-node-01"' "$out"
+
+# ---------- 16. Policy matrix consistency ----------
+echo "=== 16. Policy matrix consistency ==="
+
+cfg=$(make_cfg cfg16.hcl 'vault_addr      = "https://prd.vault.example.com:8200"
+api_addr        = "https://10.0.1.50:8200"
+cluster_addr    = "https://[2001:db8::1]:8201"
+token           = "s.abc123"
+access_key      = "AKIAIOSFODNN7EXAMPLE"
+tls_cert_file   = "/opt/vault/tls/server.crt"
+tls_key_file    = "/opt/vault/tls/server.key"
+cluster_name    = "vault-prod-eu-west-1"
+region          = "eu-west-1"
+log_level       = "info"
+ui              = true
+')
+out=$(run_sanitize "$cfg")
+
+# endpoint/anonymize
+assert_contains     "matrix: vault_addr DNS masked"  'vault_addr      = "https://x.x.example.com:8200"' "$out"
+assert_contains     "matrix: api_addr IPv4 masked"   'api_addr        = "https://x.x.x.50:8200"'        "$out"
+assert_contains     "matrix: cluster_addr IPv6"      '[x:x::1]'                                         "$out"
+
+# secret/full-redact
+assert_contains     "matrix: token redacted"       'token           = "***REDACTED***"'        "$out"
+assert_contains     "matrix: access_key redacted"  'access_key      = "***REDACTED***"'        "$out"
+
+# path/tail-preserve
+assert_contains     "matrix: tls_cert_file masked" 'tls_cert_file   = ".../.../tls/server.crt"' "$out"
+assert_contains     "matrix: tls_key_file masked"  'tls_key_file    = ".../.../tls/server.key"'  "$out"
+
+# identifier/token-mask
+assert_contains     "matrix: cluster_name masked"  'cluster_name    = "x-x-eu-west-1"'  "$out"
+assert_contains     "matrix: region masked"         'region          = "x-west-1"'        "$out"
+
+# non-sensitive: pass-through
+assert_contains     "matrix: log_level unchanged"  'log_level       = "info"'  "$out"
+assert_contains     "matrix: ui unchanged"          'ui              = true'    "$out"
+
+# ---------- 17. Generic custom/env fallback ----------
+echo "=== 17. Generic custom/env fallback ==="
+
+# 17a. Custom key whose name contains 'token' → full redact
+cfg=$(make_cfg cfg17a.hcl 'app_token = "tok-abc123"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: app_token redacted"    'app_token = "***REDACTED***"'  "$out"
+assert_not_contains "fallback: no real token value"   "tok-abc123"                    "$out"
+
+# 17b. Custom key containing 'secret' → full redact
+cfg=$(make_cfg cfg17b.hcl 'db_secret = "sup3r-secret"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: db_secret redacted"   'db_secret = "***REDACTED***"'  "$out"
+
+# 17c. Custom key containing 'password' → full redact
+cfg=$(make_cfg cfg17c.hcl 'service_password = "pass123"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: service_password redacted"  'service_password = "***REDACTED***"'  "$out"
+
+# 17d. Custom key ending in '_key' → full redact
+cfg=$(make_cfg cfg17d.hcl 'encryption_key = "enc-key-abc"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: encryption_key redacted"  'encryption_key = "***REDACTED***"'  "$out"
+
+# 17e. Custom key with URL value → addr masking
+cfg=$(make_cfg cfg17e.hcl 'custom_endpoint = "https://svc.internal.example.com:9000"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: URL value addr-masked"  'custom_endpoint = "https://x.x.example.com:9000"'  "$out"
+assert_not_contains "fallback: URL real host gone"     "svc.internal.example.com"                           "$out"
+
+# 17f. Custom key with absolute path value → path masking
+cfg=$(make_cfg cfg17f.hcl 'data_dir = "/var/lib/vault/data"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: path value tail-masked"   'data_dir = ".../.../vault/data"'  "$out"
+assert_not_contains "fallback: path real value gone"     "/var/lib/vault/data"               "$out"
+
+# 17g. Custom key with multi-token identifier value → identifier masking
+cfg=$(make_cfg cfg17g.hcl 'custom_id = "prod-service-eu-west-1"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: ident value token-masked"  'custom_id = "x-x-eu-west-1"'   "$out"
+assert_not_contains "fallback: ident real value gone"     "prod-service-eu-west-1"          "$out"
+
+# 17h. Env-like key (uppercase) with URL → addr masking via fallback
+cfg=$(make_cfg cfg17h.hcl 'BACKEND_ENDPOINT = "https://backend.prod.example.com:8443"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fallback: BACKEND_ENDPOINT masked"   'BACKEND_ENDPOINT = "https://x.x.example.com:8443"'  "$out"
+
+# 17i. Non-secret plain value → pass through unchanged
+cfg=$(make_cfg cfg17i.hcl 'max_connections = "100"
+default_ttl = "768h"
+ui = true
+')
+out=$(run_sanitize "$cfg")
+assert_contains "fallback: non-secret integer unchanged"  'max_connections = "100"'  "$out"
+assert_contains "fallback: non-secret ttl unchanged"      'default_ttl = "768h"'     "$out"
+assert_contains "fallback: non-secret bool unchanged"     'ui = true'                "$out"
+
+# ---------- 18. Telemetry non-regression (no bespoke telemetry rules) ----------
+echo "=== 18. Telemetry non-regression ==="
+
+# Generic telemetry keys should follow generic-fallback rules, not any special telemetry logic.
+cfg=$(make_cfg cfg18.hcl 'telemetry {
+  statsd_address   = "statsd.monitoring.example.com:8125"
+  metrics_prefix   = "vault-prod-eu-west-1"
+  disable_hostname = true
+  max_gauge_keys   = 500
+}
+')
+out=$(run_sanitize "$cfg")
+
+# statsd_address: not in addr pattern, value is host:port → fallback addr masking
+assert_contains     "telemetry: statsd_address addr-masked"  'statsd_address   = "x.x.example.com:8125"'  "$out"
+assert_not_contains "telemetry: statsd real host gone"        "statsd.monitoring.example.com"               "$out"
+
+# metrics_prefix: not in ident pattern, value is 5-token ident → fallback ident masking
+assert_contains     "telemetry: metrics_prefix token-masked"  'metrics_prefix   = "x-x-eu-west-1"'  "$out"
+
+# disable_hostname / max_gauge_keys: plain non-sensitive values → unchanged
+assert_contains "telemetry: disable_hostname unchanged"  'disable_hostname = true'   "$out"
+assert_contains "telemetry: max_gauge_keys unchanged"    'max_gauge_keys   = 500'    "$out"
+
+# Confirm no special per-field telemetry-only magic was introduced
+assert_not_contains "telemetry: no TELEMETRY_REDACTED marker" "TELEMETRY_REDACTED" "$out"
 
 # ---------- Summary ----------
 echo ""
