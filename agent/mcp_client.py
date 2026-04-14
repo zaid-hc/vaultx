@@ -161,11 +161,11 @@ def _build_mcp_child_env() -> dict[str, str]:
         "VAULT_",
         "SSL_",
         "REQUESTS_",
+    )
+    passthrough_names = {
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
-    )
-    passthrough_names = {
         "CURL_CA_BUNDLE",
         "AWS_REGION",
         "AWS_DEFAULT_REGION",

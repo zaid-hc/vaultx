@@ -75,7 +75,7 @@ class OllamaClient:
         if stream:
             return self._stream_chat(messages)
         response = self._client.chat(model=self.model, messages=messages)
-        return _get_message_content(response)
+        return _get_message_content(response) or ""
 
     def chat_with_tools(
         self,

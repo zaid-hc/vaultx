@@ -265,7 +265,10 @@ async def _complete_with_tools(
                 }
             )
 
-    return "Unable to complete the request after multiple tool invocations."
+    return (
+        f"Unable to complete the request after {max_round_trips} tool invocations. "
+        "The model may be stuck in a loop or encountering repeated tool failures."
+    )
 
 
 def _format_tool_result(tool_result: Any) -> str:
