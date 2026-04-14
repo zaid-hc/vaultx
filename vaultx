@@ -103,11 +103,40 @@ EOF
 
 # ---------- Sanitize Subcommand ----------
 
+# ================================================================================
+# SANITIZE POLICY MATRIX
+# ================================================================================
+# Field category       | Matched keys (case-insensitive)          | Applied policy
+# ---------------------|------------------------------------------|-----------------
+# secret/full-redact   | token, auth_token, api_key, secret,      | ***REDACTED***
+#                      | client_secret, kms_key, kms_key_id,      |
+#                      | private_key, password, access_key,       |
+#                      | secret_key                               |
+# endpoint/anonymize   | vault_addr, api_addr, cluster_addr,      | mask host
+#                      | cluster_address, address, redirect_addr  | (DNS/IPv4/IPv6)
+# path/tail-preserve   | path, tls_cert_file, tls_key_file,       | .../.../dir/file
+#                      | tls_client_ca_file, tls_ca_file,         |
+#                      | ca_cert, ca_path, cert_file, key_file,   |
+#                      | pid_file, log_file, file_path,           |
+#                      | audit_log_path, config_file              |
+# identifier/token-mask| cluster_name, node_id, node_name,        | x-x-suffix
+#                      | region, availability_zone                |
+# generic-fallback     | any other key — classified by key name   | redact if secret-
+#                      | or value content                         | like; mask addr/
+#                      |                                          | path/ident by val
+# ================================================================================
+
 # Sensitive key names matched case-insensitively
 SANITIZE_SENSITIVE_PATTERN='^(token|auth_token|api_key|secret|client_secret|kms_key|kms_key_id|private_key|password|access_key|secret_key)$'
 
 # Address/URL key names that should have their hostname DNS-anonymized
 SANITIZE_ADDR_PATTERN='^(vault_addr|api_addr|cluster_addr|cluster_address|address|redirect_addr)$'
+
+# File-path key names: tail-preserving masking (keep last two path segments)
+SANITIZE_PATH_PATTERN='^(path|tls_cert_file|tls_key_file|tls_client_ca_file|tls_ca_file|ca_cert|ca_path|cert_file|key_file|pid_file|log_file|file_path|audit_log_path|config_file)$'
+
+# Resource-identifier key names: delimiter-aware token masking
+SANITIZE_IDENT_PATTERN='^(cluster_name|node_id|node_name|region|availability_zone)$'
 
 # mask_ipv6_inner <addr>
 # Partially masks an IPv6 address string (no brackets), keeping the last hextet readable.
@@ -306,6 +335,116 @@ mask_addr_value() {
 # Keep the old name as an alias so existing call-sites remain valid.
 mask_vault_addr() { mask_addr_value "$@"; }
 
+# mask_path_value <path>
+# Tail-preserving path masking: keep the last two path segments, replace each
+# preceding segment with '...'.  Works for both Unix and Windows paths.
+#   /etc/ssl/vault/server.key         ->  .../.../vault/server.key
+#   /opt/vault/tls/tls.crt            ->  .../.../tls/tls.crt
+#   /opt/vault/data                   ->  .../vault/data
+#   /vault/data  or  vault/data       ->  unchanged (<=2 segments)
+#   C:\vault\tls\server.key           ->  ...\tls\server.key
+mask_path_value() {
+  local value="$1"
+  [[ -z "$value" ]] && echo "$value" && return 0
+
+  # Detect delimiter (backslash = Windows path)
+  local delim="/"
+  if [[ "$value" == *"\\"* && "$value" != *"/"* ]]; then
+    delim="\\"
+  fi
+
+  # Normalize to forward slashes for splitting, then restore delimiter in output
+  local norm="${value//\\//}"
+
+  # Strip leading slash or Windows drive letter prefix
+  local rest="${norm#/}"
+  if [[ "$rest" =~ ^[A-Za-z]: ]]; then
+    rest="${rest:3}"
+  fi
+
+  IFS='/' read -ra _parts <<< "$rest"
+
+  # Filter empty segments (e.g. from trailing slash)
+  local parts=()
+  for _p in "${_parts[@]}"; do
+    [[ -n "$_p" ]] && parts+=("$_p")
+  done
+  local n=${#parts[@]}
+
+  # Two or fewer segments: no leading directories to mask
+  if [[ $n -le 2 ]]; then
+    echo "$value"
+    return 0
+  fi
+
+  # Build '...<delim>' prefix — one '...' per masked segment
+  local keep_from=$(( n - 2 ))
+  local prefix=""
+  for (( _i=0; _i<keep_from; _i++ )); do
+    prefix="${prefix}...${delim}"
+  done
+
+  # Build kept tail using original delimiter
+  local kept="${parts[$keep_from]}"
+  for (( _i=keep_from+1; _i<n; _i++ )); do
+    kept="${kept}${delim}${parts[$_i]}"
+  done
+
+  echo "${prefix}${kept}"
+}
+
+# mask_identifier_value <identifier>
+# Delimiter-aware token masking for resource identifiers.
+# Uses the first delimiter found: '-' takes priority over '_'.
+# Rule: keep the last ceil(N/2) tokens, replace the first floor(N/2) with 'x'.
+# Single-token or no-delimiter values are returned unchanged.
+#   vault-prod-eu-west-1   ->  x-x-eu-west-1   (N=5, keep 3, mask 2)
+#   prod-cluster-01        ->  x-cluster-01     (N=3, keep 2, mask 1)
+#   my_app_prod_us_east    ->  x_x_prod_us_east (N=5, keep 3, mask 2)
+#   production             ->  production       (no delimiter)
+mask_identifier_value() {
+  local value="$1"
+
+  local delim=""
+  if [[ "$value" == *"-"* ]]; then
+    delim="-"
+  elif [[ "$value" == *"_"* ]]; then
+    delim="_"
+  else
+    echo "$value"
+    return 0
+  fi
+
+  IFS="$delim" read -ra tokens <<< "$value"
+  local n=${#tokens[@]}
+
+  if [[ $n -le 1 ]]; then
+    echo "$value"
+    return 0
+  fi
+
+  local keep=$(( (n + 1) / 2 ))
+  local mask=$(( n - keep ))
+
+  # Nothing to mask (shouldn't happen for n>=2 but guard anyway)
+  if [[ $mask -eq 0 ]]; then
+    echo "$value"
+    return 0
+  fi
+
+  local result=""
+  for (( _i=0; _i<mask; _i++ )); do
+    result="${result}x${delim}"
+  done
+
+  result="${result}${tokens[$mask]}"
+  for (( _i=mask+1; _i<n; _i++ )); do
+    result="${result}${delim}${tokens[$_i]}"
+  done
+
+  echo "$result"
+}
+
 # sanitize_line <line>
 # Processes one line of a config file: redacts sensitive keys, masks vault_addr.
 sanitize_line() {
@@ -359,6 +498,125 @@ sanitize_line() {
       fi
       return 0
     fi
+
+    # Path keys: tail-preserving masking (keep last two path segments)
+    if [[ "$key_lower" =~ $SANITIZE_PATH_PATTERN ]]; then
+      local raw masked suffix
+      if [[ "$val" =~ ^\"([^\"]*)\"(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_path_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}\"${masked}\"${suffix}"
+      elif [[ "$val" =~ ^\'([^\']*)\'(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_path_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}'${masked}'${suffix}"
+      else
+        masked=$(mask_path_value "$val")
+        echo "${indent}${key}${sp1}=${sp2}${masked}"
+      fi
+      return 0
+    fi
+
+    # Resource identifier keys: delimiter-aware token masking
+    if [[ "$key_lower" =~ $SANITIZE_IDENT_PATTERN ]]; then
+      local raw masked suffix
+      if [[ "$val" =~ ^\"([^\"]*)\"(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_identifier_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}\"${masked}\"${suffix}"
+      elif [[ "$val" =~ ^\'([^\']*)\'(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_identifier_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}'${masked}'${suffix}"
+      else
+        masked=$(mask_identifier_value "$val")
+        echo "${indent}${key}${sp1}=${sp2}${masked}"
+      fi
+      return 0
+    fi
+
+    # Generic fallback: classify unrecognised keys by key name or value content.
+    # Extract the raw (unquoted) value for content-based classification.
+    local raw_val
+    if [[ "$val" =~ ^\"([^\"]*)\" ]]; then
+      raw_val="${BASH_REMATCH[1]}"
+    elif [[ "$val" =~ ^\'([^\']*)\' ]]; then
+      raw_val="${BASH_REMATCH[1]}"
+    else
+      raw_val="$val"
+    fi
+
+    # 5a. Key name implies a secret → full redact
+    if [[ "$key_lower" =~ (^|_)(token|secret|password|passwd|credential)(s?)($|_) ]] || \
+       [[ "$key_lower" =~ (^|_)key$ ]]; then
+      local suffix=""
+      if [[ "$val" =~ ^\"[^\"]*\"(.*)$ ]]; then
+        suffix="${BASH_REMATCH[1]}"
+        echo "${indent}${key}${sp1}=${sp2}\"***REDACTED***\"${suffix}"
+      elif [[ "$val" =~ ^\'[^\']*\'(.*)$ ]]; then
+        suffix="${BASH_REMATCH[1]}"
+        echo "${indent}${key}${sp1}=${sp2}'***REDACTED***'${suffix}"
+      else
+        echo "${indent}${key}${sp1}=${sp2}\"***REDACTED***\""
+      fi
+      return 0
+    fi
+
+    # 5b. Value looks like an endpoint / URL / IP → addr masking
+    if [[ "$raw_val" == *"://"* ]] || \
+       [[ "$raw_val" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} ]] || \
+       [[ "$raw_val" =~ ^[a-zA-Z][a-zA-Z0-9-]*(\.[a-zA-Z][a-zA-Z0-9.-]+)+(:[0-9]+)?$ ]]; then
+      local raw masked suffix
+      if [[ "$val" =~ ^\"([^\"]*)\"(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_addr_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}\"${masked}\"${suffix}"
+      elif [[ "$val" =~ ^\'([^\']*)\'(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_addr_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}'${masked}'${suffix}"
+      else
+        masked=$(mask_addr_value "$raw_val")
+        echo "${indent}${key}${sp1}=${sp2}${masked}"
+      fi
+      return 0
+    fi
+
+    # 5c. Value looks like a file path → tail-preserving path masking
+    if [[ "$raw_val" == "/"* ]] || [[ "$raw_val" =~ ^[A-Za-z]:\\ ]]; then
+      local raw masked suffix
+      if [[ "$val" =~ ^\"([^\"]*)\"(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_path_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}\"${masked}\"${suffix}"
+      elif [[ "$val" =~ ^\'([^\']*)\'(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_path_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}'${masked}'${suffix}"
+      else
+        masked=$(mask_path_value "$raw_val")
+        echo "${indent}${key}${sp1}=${sp2}${masked}"
+      fi
+      return 0
+    fi
+
+    # 5d. Value looks like a resource identifier (3+ delimiter-separated tokens)
+    if [[ "$raw_val" =~ ^[a-zA-Z0-9]+[-_][a-zA-Z0-9]+([-_][a-zA-Z0-9]+)+$ ]]; then
+      local raw masked suffix
+      if [[ "$val" =~ ^\"([^\"]*)\"(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_identifier_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}\"${masked}\"${suffix}"
+      elif [[ "$val" =~ ^\'([^\']*)\'(.*)$ ]]; then
+        raw="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+        masked=$(mask_identifier_value "$raw")
+        echo "${indent}${key}${sp1}=${sp2}'${masked}'${suffix}"
+      else
+        masked=$(mask_identifier_value "$raw_val")
+        echo "${indent}${key}${sp1}=${sp2}${masked}"
+      fi
+      return 0
+    fi
   fi
 
   echo "$line"
@@ -390,25 +648,49 @@ OPTIONS:
   -out=<file>         Write sanitized output to FILE instead of stdout
   -help               Show this help message
 
-REDACTED KEYS (replaced with ***REDACTED***):
-  token, auth_token, api_key, secret, client_secret,
-  kms_key, kms_key_id, private_key, password, access_key, secret_key
-  (matching is case-insensitive)
+POLICY MATRIX:
 
-ADDRESS MASKING (host DNS-anonymized, structure preserved):
-  Applies to: vault_addr, api_addr, cluster_addr, cluster_address, address,
-              redirect_addr  (matched case-insensitively)
+  secret/full-redact  — replaced with ***REDACTED***
+    token, auth_token, api_key, secret, client_secret,
+    kms_key, kms_key_id, private_key, password, access_key, secret_key
+    (case-insensitive; generic fallback also redacts keys whose name
+     contains token/secret/password/passwd/credential or ends with _key)
 
-  IPv4 host:       169.182.4.100               ->  x.x.x.100
-  DNS 2-label:     hashicorp.com               ->  hashicorp.com  (unchanged)
-  DNS 3-label:     vault.hashicorp.com         ->  x.hashicorp.com
-  DNS 4-label:     prd.ec2.hashicorp.com       ->  x.x.hashicorp.com
-  URL:             https://vault.hashicorp.com:8200/v1
-                                               ->  https://x.hashicorp.com:8200/v1
-  host:port:       prd.ec2.hashicorp.com:8201  ->  x.x.hashicorp.com:8201
-  Loopback:        localhost / 127.0.0.1 / 0.0.0.0  ->  unchanged
-  IPv6:            [2001:db8::1]               ->  [REDACTED_IPv6]
-                   (IPv6 loopback ::1 is preserved; all other IPv6 hosts are fully redacted)
+  endpoint/anonymize  — host masked, scheme/port/path preserved
+    vault_addr, api_addr, cluster_addr, cluster_address, address,
+    redirect_addr  (case-insensitive)
+
+    IPv4 host:       169.182.4.100               ->  x.x.x.100
+    DNS 2-label:     hashicorp.com               ->  hashicorp.com  (unchanged)
+    DNS 3-label:     vault.hashicorp.com         ->  x.hashicorp.com
+    DNS 4-label:     prd.ec2.hashicorp.com       ->  x.x.hashicorp.com
+    URL:             https://vault.hashicorp.com:8200/v1
+                                                 ->  https://x.hashicorp.com:8200/v1
+    host:port:       prd.ec2.hashicorp.com:8201  ->  x.x.hashicorp.com:8201
+    Loopback:        localhost / 127.0.0.1 / 0.0.0.0  ->  unchanged
+    IPv6:            [2001:db8::1]               ->  [x:x::1]
+                     (loopback [::1] and wildcard [::] preserved)
+
+  path/tail-preserve  — leading directories masked, last two segments kept
+    path, tls_cert_file, tls_key_file, tls_client_ca_file, tls_ca_file,
+    ca_cert, ca_path, cert_file, key_file, pid_file, log_file,
+    file_path, audit_log_path, config_file  (case-insensitive)
+
+    /etc/ssl/vault/server.key   ->  .../.../vault/server.key
+    /opt/vault/data             ->  .../vault/data
+    C:\vault\tls\server.key     ->  ...\tls\server.key
+
+  identifier/token-mask  — leading tokens masked, suffix kept
+    cluster_name, node_id, node_name, region, availability_zone
+
+    vault-prod-eu-west-1        ->  x-x-eu-west-1
+    us-east-1                   ->  x-east-1
+
+  generic-fallback  — applied to all other keys:
+    key name implies secret     ->  ***REDACTED***
+    value is URL / IP           ->  endpoint/anonymize policy
+    value is absolute path      ->  path/tail-preserve policy
+    value is multi-token ident  ->  identifier/token-mask policy (3+ tokens)
 
 NOTE: Log sanitization is planned for a future release.
 
