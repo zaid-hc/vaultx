@@ -109,6 +109,65 @@ SANITIZE_SENSITIVE_PATTERN='^(token|auth_token|api_key|secret|client_secret|kms_
 # Address/URL key names that should have their hostname DNS-anonymized
 SANITIZE_ADDR_PATTERN='^(vault_addr|api_addr|cluster_addr|cluster_address|address|redirect_addr)$'
 
+# mask_ipv6_inner <addr>
+# Partially masks an IPv6 address string (no brackets), keeping the last hextet readable.
+# All prior hextets are replaced with 'x', preserving '::' compressed notation.
+#   2001:db8::1           -> x:x::1
+#   fd00:abcd::10         -> x:x::10
+#   2001:db8:0:0:0:0:0:1  -> x:x:x:x:x:x:x:1
+mask_ipv6_inner() {
+  local addr="$1"
+
+  # Get the last hextet (segment after the final colon)
+  local last="${addr##*:}"
+
+  if [[ "$addr" == *"::"* ]]; then
+    # Compressed form — split on the first "::"
+    local before_dc="${addr%%::*}"
+    local after_dc="${addr#*::}"
+
+    # Mask all groups in before_dc
+    local masked_before=""
+    if [[ -n "$before_dc" ]]; then
+      local t="$before_dc"
+      while [[ "$t" == *":"* ]]; do
+        masked_before="${masked_before}x:"
+        t="${t#*:}"
+      done
+      masked_before="${masked_before}x"
+    fi
+
+    # Mask all groups in after_dc except the last hextet
+    local masked_after="$last"
+    if [[ "$after_dc" == *":"* ]]; then
+      local after_prefix="${after_dc%:*}"
+      local masked_after_prefix=""
+      local t="$after_prefix"
+      while [[ "$t" == *":"* ]]; do
+        masked_after_prefix="${masked_after_prefix}x:"
+        t="${t#*:}"
+      done
+      masked_after_prefix="${masked_after_prefix}x"
+      masked_after="${masked_after_prefix}:${last}"
+    fi
+
+    if [[ -n "$masked_before" ]]; then
+      echo "${masked_before}::${masked_after}"
+    else
+      echo "::${masked_after}"
+    fi
+  else
+    # Full (uncompressed) form — mask all groups except the last
+    local result=""
+    local t="$addr"
+    while [[ "$t" == *":"* ]]; do
+      result="${result}x:"
+      t="${t#*:}"
+    done
+    echo "${result}${last}"
+  fi
+}
+
 # mask_host <host>
 # Masks a bare hostname/IP for address sanitization.
 #   IPv4               -> x.x.x.<last-octet>
@@ -116,8 +175,8 @@ SANITIZE_ADDR_PATTERN='^(vault_addr|api_addr|cluster_addr|cluster_address|addres
 #   DNS 3+ labels      -> replace each subdomain label with x
 #                         (e.g., prd.ec2.hashicorp.com -> x.x.hashicorp.com)
 #   Single-label       -> x
-#   localhost/127.0.0.1/0.0.0.0/::1 -> unchanged
-#   IPv6               -> [REDACTED_IPv6]
+#   localhost/127.0.0.1/0.0.0.0/::1/:: -> unchanged
+#   IPv6               -> [x:x::last] (partial mask, last hextet preserved)
 mask_host() {
   local host="$1"
 
@@ -129,7 +188,8 @@ mask_host() {
 
   # Loopback / localhost / wildcard bind: preserve as-is
   if [[ "$inner_host" == "localhost" || "$inner_host" == "127.0.0.1" || \
-        "$inner_host" == "::1"       || "$inner_host" == "0.0.0.0" ]]; then
+        "$inner_host" == "::1"       || "$inner_host" == "0.0.0.0"   || \
+        "$inner_host" == "::" ]]; then
     echo "$host"
     return 0
   fi
@@ -142,8 +202,11 @@ mask_host() {
 
   # IPv6 (contains two or more colons — IPv6 requires at least "::" or multiple ":"):
   # A plain host:port has exactly one colon, so this check correctly excludes those.
+  # Partially mask: keep last hextet, replace prior hextets with x.
   if [[ "$inner_host" == *":"*":"* ]]; then
-    echo "[REDACTED_IPv6]"
+    local masked
+    masked=$(mask_ipv6_inner "$inner_host")
+    echo "[${masked}]"
     return 0
   fi
 

@@ -219,24 +219,53 @@ cfg=$(make_cfg cfg7d.hcl 'vault_addr = "http://127.0.0.1:8200/v1"')
 out=$(run_sanitize "$cfg")
 assert_contains "http://127.0.0.1 URL preserved" 'vault_addr = "http://127.0.0.1:8200/v1"' "$out"
 
-# ---------- 8. IPv6 behavior ----------
-echo "=== 8. IPv6 behavior (v1: full host redaction) ==="
+# ---------- 8. IPv6 behavior (partial mask: keep last hextet) ----------
+echo "=== 8. IPv6 partial masking (keep last hextet) ==="
 
 cfg=$(make_cfg cfg8a.hcl 'vault_addr = "[2001:db8::1]"')
 out=$(run_sanitize "$cfg")
-assert_contains "bare IPv6 redacted"      '[REDACTED_IPv6]' "$out"
-assert_not_contains "real IPv6 not present" "2001:db8"      "$out"
+assert_contains     "bare IPv6 partially masked"  '[x:x::1]'  "$out"
+assert_contains     "bare IPv6 last hextet kept"  '::1]'      "$out"
+assert_not_contains "real IPv6 not present"        "2001:db8"  "$out"
 
 cfg=$(make_cfg cfg8b.hcl 'vault_addr = "http://[2001:db8::1]:8200"')
 out=$(run_sanitize "$cfg")
-assert_contains     "IPv6 URL host redacted"    '[REDACTED_IPv6]'  "$out"
-assert_contains     "IPv6 URL scheme preserved" "http://"          "$out"
-assert_contains     "IPv6 URL port preserved"   ":8200"            "$out"
-assert_not_contains "real IPv6 address gone"    "2001:db8"         "$out"
+assert_contains     "IPv6 URL host partially masked" '[x:x::1]' "$out"
+assert_contains     "IPv6 URL scheme preserved"      "http://"  "$out"
+assert_contains     "IPv6 URL port preserved"        ":8200"    "$out"
+assert_not_contains "real IPv6 address gone"         "2001:db8" "$out"
 
 cfg=$(make_cfg cfg8c.hcl 'vault_addr = "http://[::1]:8200"')
 out=$(run_sanitize "$cfg")
 assert_contains "IPv6 loopback preserved" 'vault_addr = "http://[::1]:8200"' "$out"
+
+# 8d. Compressed IPv6 — fd00:abcd::10
+cfg=$(make_cfg cfg8d.hcl 'cluster_addr = "https://[fd00:abcd::10]:8201/v1"')
+out=$(run_sanitize "$cfg")
+assert_contains     "fd00 IPv6 partially masked"   '[x:x::10]' "$out"
+assert_contains     "fd00 IPv6 last hextet kept"   '::10]'     "$out"
+assert_contains     "fd00 IPv6 scheme preserved"   "https://"  "$out"
+assert_contains     "fd00 IPv6 port preserved"     ":8201"     "$out"
+assert_not_contains "fd00 IPv6 real addr gone"     "fd00:abcd" "$out"
+
+# 8e. Wildcard bind address [::]
+cfg=$(make_cfg cfg8e.hcl 'address = "[::]:8200"')
+out=$(run_sanitize "$cfg")
+assert_contains "IPv6 wildcard bind preserved" 'address = "[::]:8200"' "$out"
+
+# 8f. Host:port form with bracketed IPv6
+cfg=$(make_cfg cfg8f.hcl 'cluster_address = "[fd00:abcd::10]:8201"')
+out=$(run_sanitize "$cfg")
+assert_contains     "IPv6 host:port partially masked"   '[x:x::10]:8201' "$out"
+assert_contains     "IPv6 host:port last hextet kept"   '::10]'          "$out"
+assert_not_contains "IPv6 host:port real addr gone"     "fd00:abcd"      "$out"
+
+# 8g. Uncompressed (full) IPv6 form
+cfg=$(make_cfg cfg8g.hcl 'vault_addr = "http://[2001:db8:0:0:0:0:0:1]:8200"')
+out=$(run_sanitize "$cfg")
+assert_contains     "uncompressed IPv6 last hextet kept" '[x:x:x:x:x:x:x:1]' "$out"
+assert_contains     "uncompressed IPv6 scheme preserved" "http://"             "$out"
+assert_not_contains "uncompressed IPv6 real addr gone"   "2001:db8"            "$out"
 
 # ---------- 9. Malformed config / error handling ----------
 echo "=== 9. Error handling ==="
@@ -343,13 +372,14 @@ assert_contains     "host:port multi-level subdomain masked" \
                     'address = "x.x.hashicorp.com:8200"' "$out"
 assert_not_contains "host:port real host gone" "prd.ec2.hashicorp.com" "$out"
 
-# 13e. IPv6 literal in address key — scheme/port preserved, IPv6 redacted (not domain-masked)
+# 13e. IPv6 literal in address key — scheme/port preserved, IPv6 partially masked
 cfg=$(make_cfg cfg13e.hcl 'cluster_addr = "https://[2001:db8::1]:8201"')
 out=$(run_sanitize "$cfg")
-assert_contains     "IPv6 address redacted"     '[REDACTED_IPv6]'   "$out"
-assert_contains     "IPv6 scheme preserved"     "https://"          "$out"
-assert_contains     "IPv6 port preserved"       ":8201"             "$out"
-assert_not_contains "IPv6 real address gone"    "2001:db8"          "$out"
+assert_contains     "IPv6 address partially masked" '[x:x::1]'   "$out"
+assert_contains     "IPv6 last hextet kept"         '::1]'       "$out"
+assert_contains     "IPv6 scheme preserved"         "https://"   "$out"
+assert_contains     "IPv6 port preserved"           ":8201"      "$out"
+assert_not_contains "IPv6 real address gone"        "2001:db8"   "$out"
 
 # 13f. redirect_addr
 cfg=$(make_cfg cfg13f.hcl 'redirect_addr = "https://node1.vault.example.com:8200"')
